@@ -11,7 +11,9 @@
  *   EDIT SEL ENV LFO FX GLO   the OSC FLT ENV LFO FX GLO pages, four knobs each (KNOB1..4)
  *   ALGORITHM / SELECT        cutoff / resonance, on every page
  *   PRESETS                   the 8 patches;  SAVE keeps your edits in that slot (flash)
- *   HOME                      panic;  OCT- OCT+ octave;  MASTER volume (platform)
+ *   HOME                      tap: MUTATE the patch (a random walk; a rest while step recording); hold: panic
+ *   ARP SEQ PLAY REC          arpeggiator (on / hold / off), the step sequencer page, transport, record
+ *   OCT- OCT+ octave;  MASTER volume (platform)
  *   USB-MIDI in               notes (velocity), CC 74 cutoff, 71 reso, 73 attack, 72 release, 1 LFO depth, 91 delay mix
  *
  * Integers only: no float, no 64-bit division (docs/RULES.md). tests/host.c runs this file on a computer. */
@@ -98,7 +100,7 @@ static void engine_tick(void);
 static void app_audio(int32_t *out, uint32_t n)
 {
     static uint32_t lph, rnd = 0x1234567u, dw, crush_n;
-    static int32_t lfo, sh, dt_cur = 20000, lpL, lpR, held;
+    static int32_t lfo, sh, dt_cur = 20000, lpL, lpR, held, pk, lgain = 32768;
     static uint32_t cpu_max, cpu_blk;
     uint32_t t0 = fm1_ticks(), b, v, i;
 
@@ -225,6 +227,10 @@ static void app_audio(int32_t *out, uint32_t n)
             if (d == 0 && dtt != dt_cur) d = dtt > dt_cur ? 1 : -1;
             dt_cur += d;
         }
+        {                                       /* limiter gain: down at once, back up slowly; threshold about -2 dBFS */
+            int32_t target = pk > 26000 ? (int32_t)(26000u * 32768u / (uint32_t)pk) : 32768;
+            lgain = target < lgain ? target : lgain + ((target - lgain) >> 4);
+        }
         for (i = 0; i < 16u; i++) {
             int32_t dry, yL, yR, fL, fR, L, R, wd;
             uint32_t rd;
@@ -244,8 +250,14 @@ static void app_audio(int32_t *out, uint32_t n)
             dlL[dw] = (int16_t)(wd > 32767 ? 32767 : wd < -32767 ? -32767 : wd);
             dlR[dw] = (int16_t)(fL > 32767 ? 32767 : fL < -32767 ? -32767 : fL);
             dw = (dw + 1u) & (DLEN - 1u);
-            L = sclip(dry + ((yL * (int32_t)P[P_DMIX]) >> 7));
-            R = sclip(dry + ((yR * (int32_t)P[P_DMIX]) >> 7));
+            L = dry + ((yL * (int32_t)P[P_DMIX]) >> 7);
+            R = dry + ((yR * (int32_t)P[P_DMIX]) >> 7);
+            {                                   /* limiter: peak follower in, gain per tick below; the soft clip catches the rest */
+                int32_t pkn = (L < 0 ? -L : L) > (R < 0 ? -R : R) ? (L < 0 ? -L : L) : (R < 0 ? -R : R);
+                pk = pkn > pk ? pkn : pk - (pk >> 11);
+            }
+            L = sclip((L * lgain) >> 15);
+            R = sclip((R * lgain) >> 15);
             out[2u * (b + i)] += L;
             out[2u * (b + i) + 1u] += R;
             scope[scope_w++ & (SCOPE_N - 1u)] = (int16_t)((L + R) >> 1);
@@ -689,13 +701,39 @@ static void draw_status(int32_t oct, const char *msg)
 }
 
 static const uint8_t CC_MAP[6][2] = {{74, P_CUT}, {71, P_RES}, {73, P_ATK}, {72, P_REL}, {1, P_LDEPTH}, {91, P_DMIX}};
+/* MUTATE (HOME): a random walk of the patch. Each knob that may move has limits that keep the patch playable:
+ * no eight-second attacks, no runaway feedback, the filter never fully shut. MODE, TUNE and the globals are left alone. */
+static const struct { uint8_t idx, lo, hi; } MUT[] = {
+    {P_MIX, 0, 127}, {P_PW, 10, 118}, {P_DET, 0, 100}, {P_SUB, 0, 127},
+    {P_CUT, 35, 127}, {P_RES, 0, 105}, {P_ENVAMT, 0, 127}, {P_DRV, 0, 110},
+    {P_ATK, 0, 90}, {P_DEC, 20, 127}, {P_SUS, 0, 127}, {P_REL, 10, 110},
+    {P_LRATE, 0, 127}, {P_LDEPTH, 0, 110}, {P_LDEST, 0, 127}, {P_LSHAPE, 0, 127},
+    {P_CRUSH, 0, 100}, {P_DMIX, 0, 90}, {P_DTIME, 0, 127}, {P_DFB, 0, 100},
+    {P_GLIDE, 0, 80}, {P_VELO, 0, 127}};
+#define NMUT (sizeof MUT / sizeof MUT[0])
+static uint32_t mrnd = 2463534242u;
+static uint32_t mrand(void) { mrnd ^= mrnd << 13; mrnd ^= mrnd >> 17; mrnd ^= mrnd << 5; return mrnd; }
+
+static void mutate(void)
+{
+    uint32_t n = 4u + mrand() % 3u, i;
+    mrnd ^= fm1_ms * 2654435761u;               /* every press is different */
+    for (i = 0; i < n; i++) {
+        uint32_t m = mrand() % NMUT, idx = MUT[m].idx;
+        int32_t v = idx == P_LDEST || idx == P_LSHAPE ? (int32_t)(mrand() & 127u)       /* a jump: pick a new target or shape */
+                                                      : (int32_t)P[idx] + (int32_t)(mrand() % 41u) - 20;   /* a step of +-20 */
+        v = v < MUT[m].lo ? MUT[m].lo : v > MUT[m].hi ? MUT[m].hi : v;
+        set_param(idx, v);
+    }
+}
+
 static const uint8_t PAT0[32] = {0xAD, 0, 45, 0, 48, 0, 45, 0, 43, 0, 43, 45, 0, 50, 0, 48};   /* a default line in A minor */
 
 static void app_main(void)
 {
     static const uint8_t PAGE_BTN[6] = {BTN_EDIT, BTN_SEL, BTN_ENV, BTN_LFO, BTN_FX, BTN_GLO};
     uint32_t prev = 0, k, t_scope = 0, t_stat = 0, t_change = 0, redraw = 1, page = 0, sel = 0, sel_drawn = 0;
-    uint32_t pending_save = 0, was_mono, lit_drawn = ~0u, edited_drawn = 0, sig_drawn = ~0u;
+    uint32_t pending_save = 0, was_mono, lit_drawn = ~0u, edited_drawn = 0, sig_drawn = ~0u, home_t = 0, home_long = 0;
     uint8_t shown[NP];
     int32_t oct_drawn = 99;
     uint8_t held[27] = {0};
@@ -749,9 +787,18 @@ static void app_main(void)
                 msg = "REC OFF"; t_msg = fm1_ms;
             } else { rec_arm = 1; msg = "REC"; t_msg = fm1_ms; }
         }
-        if (b & (1u << BTN_HOME)) {             /* a rest while step recording, else panic */
-            if (rec_arm && !playing) push_ev(EV_REST, 0, 0);
-            else push_ev(EV_PANIC, 0, 0);
+        if (b & (1u << BTN_HOME)) { home_t = fm1_ms; home_long = 0; }
+        if (home_t && !home_long && (fm1_in.buttons >> BTN_HOME & 1u) && fm1_ms - home_t > 600u) {   /* held: panic */
+            home_long = 1;
+            push_ev(EV_PANIC, 0, 0);
+            msg = "PANIC"; t_msg = fm1_ms;
+        }
+        if (rel & (1u << BTN_HOME)) {           /* tapped: a rest while step recording, else mutate the patch */
+            if (home_t && !home_long) {
+                if (rec_arm && !playing) push_ev(EV_REST, 0, 0);
+                else { mutate(); msg = "MUTATED"; t_msg = fm1_ms; }
+            }
+            home_t = 0;
         }
         if (b & (1u << BTN_OCT_DOWN) && set.oct > -2) { set.oct--; pending_save = 1; t_change = fm1_ms; }
         if (b & (1u << BTN_OCT_UP) && set.oct < 2) { set.oct++; pending_save = 1; t_change = fm1_ms; }

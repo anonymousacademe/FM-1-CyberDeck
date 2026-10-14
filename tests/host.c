@@ -26,8 +26,8 @@
 
 static volatile uint32_t fm1_ms;
 static struct { uint32_t notes, buttons; } fm1_in;
-static uint32_t host_edges;
-static uint32_t fm1_input_edges(uint32_t *released) { uint32_t b = host_edges; host_edges = 0; *released = 0; return b; }
+static uint32_t host_edges, host_rel, host_rel_at[16];
+static uint32_t fm1_input_edges(uint32_t *released) { uint32_t b = host_edges; host_edges = 0; *released = host_rel; host_rel = 0; return b; }
 static uint32_t fm1_input_note_edges(void) { return 0; }   /* (the script sets fm1_in.notes) */
 static int32_t host_enc[8];
 static int32_t fm1_enc_take(uint32_t e) { int32_t v = host_enc[e & 7u]; host_enc[e & 7u] = 0; return v; }
@@ -88,7 +88,7 @@ static void app_audio(int32_t *out, uint32_t n);
 static void app_main(void);
 
 /* the script: at t ms, keys down (bit k = key k, 0 = F3), a button edge, a MIDI message. A script file (the second
- * argument) replaces it, a line each: "T keys MASK" (hex or decimal), "T btn ID", "T enc ID N", "T shot", "T midi ST D1 D2", "T end" */
+ * argument) replaces it, a line each: "T keys MASK" (hex or decimal), "T btn ID [MS]", "T enc ID N", "T shot", "T midi ST D1 D2", "T end" */
 typedef struct { uint32_t t, keys; int btn; uint8_t st, d1, d2; } host_ev_t;
 static const host_ev_t SCRIPT0[] = {
     {200, 1u << 7, -1, 0, 0, 0},                                /* C4 */
@@ -120,7 +120,7 @@ static void read_script(const char *path)
         if (!strcmp(what, "shot")) { if (!shot_script) { shot_n = 0; shot_script = 1; } if (shot_n < 16u) SHOT[shot_n++] = e.t; continue; }
         if (!strcmp(what, "keys")) { sscanf(line, "%*u %*s %i", (int *)&e.keys); }
         else if (!strcmp(what, "enc")) { int id = 0, dn = 0; sscanf(line, "%*u %*s %d %d", &id, &dn); e.btn = 100 + id; e.keys = (uint32_t)dn; }
-        else if (!strcmp(what, "btn")) { sscanf(line, "%*u %*s %d", &e.btn); }
+        else if (!strcmp(what, "btn")) { int dur = 0; sscanf(line, "%*u %*s %d %d", &e.btn, &dur); e.keys = (uint32_t)dur; }
         else if (!strcmp(what, "midi")) { sscanf(line, "%*u %*s %i %u %u", (int *)&a, &b, &c); e.st = (uint8_t)a; e.d1 = (uint8_t)b; e.d2 = (uint8_t)c; }
         else continue;
         ev[n++] = e;
@@ -176,6 +176,8 @@ static void platform_poll(void)                 /* one call = one millisecond */
     static uint32_t step, shot, owed, frame;
     static int32_t blk[2u * HALF_FRAMES];
     fm1_ms++;
+    for (uint32_t bt = 0; bt < 16u; bt++)
+        if (host_rel_at[bt] && fm1_ms >= host_rel_at[bt]) { host_rel_at[bt] = 0; fm1_in.buttons &= ~(1u << bt); host_rel |= 1u << bt; }
     while (step < script_n && script[step].t <= fm1_ms) {
         if (script[step].st) {
             mq[mq_w % 64u][0] = script[step].st; mq[mq_w % 64u][1] = script[step].d1; mq[mq_w % 64u][2] = script[step].d2;
@@ -183,7 +185,11 @@ static void platform_poll(void)                 /* one call = one millisecond */
         } else if (script[step].btn >= 100)
             host_enc[(script[step].btn - 100) & 7] += (int32_t)script[step].keys;
         else if (script[step].btn >= 0)
+        {                                       /* a press now (fm1_in.buttons), its release after keys ms (default 80) */
             host_edges |= 1u << script[step].btn;
+            fm1_in.buttons |= 1u << script[step].btn;
+            host_rel_at[script[step].btn] = fm1_ms + (script[step].keys ? script[step].keys : 80u);
+        }
         else
             fm1_in.notes = script[step].keys;
         step++;
