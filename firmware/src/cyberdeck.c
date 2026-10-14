@@ -28,12 +28,16 @@ enum { P_MIX, P_PW, P_DET, P_SUB,
        P_ATK, P_DEC, P_SUS, P_REL,
        P_LRATE, P_LDEPTH, P_LDEST, P_LSHAPE,
        P_CRUSH, P_DMIX, P_DTIME, P_DFB,
-       P_GLIDE, P_MODE, P_TUNE, P_VELO,
+       P_GLIDE, P_MODE, P_TUNE, P_VELO,        /* ---- the first 24 belong to the preset; the rest are global ---- */
+       P_ARPMODE, P_ARPOCT, P_ARPRATE, P_GATE,
+       P_BPM, P_SWING, P_LEN, P_XPOSE,
        NP };
+#define NPP 24u                                 /* params per preset */
 static volatile uint8_t P[NP];
 
 #define NPRESET 8u
-static const uint8_t FACTORY[NPRESET][NP] = {
+static const uint8_t GLOBAL0[NP - NPP] = {0, 20, 40, 80,   60, 0, 60, 64};   /* up, 1 oct, 1/16, gate 67 % | 120 bpm, no swing, 16 steps, +0 */
+static const uint8_t FACTORY[NPRESET][NPP] = {
     /*        MIX PW DET SUB | CUT RES ENV DRV | ATK DEC SUS REL | LRT LDP LDS LSH | CRU DMX DTM DFB | GLD MOD TUN VEL */
     /* NEON RAIN   */ { 50, 64, 20, 30,   70, 30, 76, 20,   85, 90, 80,100,   25, 30, 10,  0,    0, 50, 70, 60,    0,  0, 64, 40},
     /* CHROME BASS */ { 20, 50, 10,100,   42, 70,110, 60,    0, 62, 20, 40,    0,  0, 10,  0,    0,  0, 60, 20,   40,100, 64, 60},
@@ -52,8 +56,10 @@ static const char *const LABEL[NP] = {
     "ATTACK", "DECAY", "SUSTAIN", "RELEASE",
     "RATE", "DEPTH", "DEST", "SHAPE",
     "CRUSH", "DLY MIX", "DLY TIME", "FEEDBACK",
-    "GLIDE", "MODE", "TUNE", "VELOCITY"};
-static const char *const TAB[6] = {"OSC", "FLT", "ENV", "LFO", "FX", "GLO"};
+    "GLIDE", "MODE", "TUNE", "VELOCITY",
+    "ARP MODE", "OCTAVES", "RATE", "GATE",
+    "BPM", "SWING", "LENGTH", "TRANSPOSE"};
+static const char *const TAB[8] = {"OSC", "FLT", "ENV", "LFO", "FX", "GLO", "ARP", "SEQ"};
 
 /* ---- the sound (runs in the audio ISR: keep it short, no flash, no screen) */
 #define NV 4u
@@ -87,6 +93,8 @@ static inline int32_t sclip(int32_t v)          /* soft clip, 1.5v - 0.5v^3 */
     return (v * ((98304 - t) >> 1)) >> 15;
 }
 
+static void engine_tick(void);
+
 static void app_audio(int32_t *out, uint32_t n)
 {
     static uint32_t lph, rnd = 0x1234567u, dw, crush_n;
@@ -109,6 +117,7 @@ static void app_audio(int32_t *out, uint32_t n)
             lfo = (lfo * ldep) >> 7;            /* depth applied: +-32512 */
         }
 
+        engine_tick();                          /* events, arpeggiator, sequencer: they start and stop voices */
         for (i = 0; i < 16u; i++) mono[i] = 0;
 
         for (v = 0; v < NV; v++) {
@@ -250,7 +259,8 @@ static void app_audio(int32_t *out, uint32_t n)
     }
 }
 
-/* ---- notes (main loop) */
+/* ---- notes and the engine. Everything that starts or stops a voice runs in the audio ISR (one writer for the voices,
+ * and a clock that is exact to a 16-sample tick). The main loop (keys, MIDI) only posts events. */
 static const uint32_t INC_C9[12] = {            /* MIDI 120..131; lower octaves shift right */
     815363807u, 863847862u, 915214929u, 969636441u, 1027294024u, 1088380105u,
     1153098554u, 1221665363u, 1294309365u, 1371273005u, 1452813141u, 1539201906u};
@@ -265,10 +275,13 @@ static uint32_t note_inc(uint32_t note)
 }
 static int is_mono(void) { return P[P_MODE] >= 64u; }
 
-static void note_on(uint32_t note, uint32_t vel)
+static void voice_on(uint32_t note, uint32_t vel)
 {
     uint32_t v, pick = 0, best = 0xFFFFFFFFu, i, j;
     if (note > 127u || !vel) return;
+#ifdef DINGHY_HOST
+    printf("%6u ms  voice on  %3u vel %3u\n", fm1_ms, note, vel);   /* (host only: the trace the tests read) */
+#endif
     if (is_mono()) {
         for (i = j = 0; i < nstk; i++) if (stk[i] != note) stk[j++] = stk[i];
         nstk = (uint8_t)j;
@@ -294,7 +307,7 @@ static void note_on(uint32_t note, uint32_t vel)
     voice[pick].gate = 1;
     voice[pick].trig++;
 }
-static void note_off(uint32_t note)
+static void voice_off(uint32_t note)
 {
     uint32_t v, i, j;
     if (is_mono()) {
@@ -310,7 +323,7 @@ static void note_off(uint32_t note)
     for (v = 0; v < NV; v++)
         if (voice[v].note == note) voice[v].gate = 0;
 }
-static void panic(void)
+static void voice_panic(void)
 {
     uint32_t v;
     nstk = 0;
@@ -323,9 +336,186 @@ static int quiet(void)
     return 1;
 }
 
+/* main -> ISR: events and switches. ISR -> main: the transport. One writer for each. */
+enum { EV_OFF, EV_ON, EV_PANIC, EV_REST };
+#define EVQ 64u
+static volatile uint16_t evq[EVQ];
+static volatile uint32_t evq_w, evq_r;
+static volatile uint8_t want_play, rec_arm, arp_cmd;     /* arp_cmd: 0 off, 1 on, 2 hold */
+static volatile uint8_t pat[32];                         /* a step: 0 rest, else note (+ 0x80: accent) */
+static volatile uint32_t playing, seq_step, rec_cursor;
+
+static void push_ev(uint32_t type, uint32_t note, uint32_t vel)
+{
+    uint32_t w = evq_w;
+    if (w - evq_r >= EVQ) return;
+    evq[w & (EVQ - 1u)] = (uint16_t)(type << 14 | (vel & 127u) << 7 | (note & 127u));
+    evq_w = w + 1u;
+}
+
+static uint32_t pmask[4], lmask[4];             /* keys down / held by HOLD, one bit per note */
+static uint8_t alist[32];
+static uint32_t an, aidx, arp_acc, arp_cur, arp_off_at, seq_acc, seq_cur, seq_off_at, seq_cur_len, seq_len = 16;
+static uint32_t eng_rnd = 0x9E3779B9u, rec_fresh, prev_rec, prev_arp, arp_dirty, octs_seen = 9, an_prev;
+static int32_t adir = 1, xp_cache;
+
+static uint32_t rand32(void) { eng_rnd ^= eng_rnd << 13; eng_rnd ^= eng_rnd >> 17; eng_rnd ^= eng_rnd << 5; return eng_rnd; }
+static uint32_t clamp_note(int32_t n) { return n < 1 ? 1u : n > 127 ? 127u : (uint32_t)n; }
+
+static void arp_build(void)                     /* the notes of the chord, low to high, across the octave range */
+{
+    const uint32_t *src = arp_cmd == 2u ? lmask : pmask;
+    uint32_t octs = 1u + ((uint32_t)P[P_ARPOCT] * 3u >> 7), o, nt, n = 0;
+    for (o = 0; o < octs; o++)
+        for (nt = 0; nt < 128u && n < 32u; nt++)
+            if ((src[nt >> 5] >> (nt & 31u) & 1u) && nt + 12u * o <= 127u) alist[n++] = (uint8_t)(nt + 12u * o);
+    an = n;
+    octs_seen = octs;
+    if (aidx >= an) aidx = 0;
+}
+
+static void arp_fire(void)
+{
+    uint32_t mode = P[P_ARPMODE] >> 5, pos = aidx;
+    if (arp_cur) { voice_off(arp_cur); arp_cur = 0; }
+    if (!an) return;
+    if (pos >= an) pos = 0;
+    arp_cur = alist[pos];
+    voice_on(arp_cur, 100);
+    if (an < 2u) { aidx = 0; return; }
+    if (mode == 0u) aidx = pos + 1u >= an ? 0 : pos + 1u;                              /* up */
+    else if (mode == 1u) aidx = pos == 0 ? an - 1u : pos - 1u;                         /* down */
+    else if (mode == 2u) {                                                             /* up-down */
+        int32_t nx = (int32_t)pos + adir;
+        if (nx >= (int32_t)an) { nx = (int32_t)an - 2; adir = -1; }
+        else if (nx < 0) { nx = 1; adir = 1; }
+        aidx = (uint32_t)nx;
+    } else aidx = rand32() % an;                                                       /* random */
+}
+
+static void rec_note(uint32_t note, uint32_t vel)
+{
+    uint8_t code = (uint8_t)(clamp_note((int32_t)note - xp_cache) | (vel >= 110u ? 0x80u : 0u));
+    uint32_t i;
+    if (playing) {                              /* overdub: to the nearest step */
+        uint32_t s = seq_step;
+        if (seq_acc * 2u >= seq_cur_len) s = s + 1u >= seq_len ? 0 : s + 1u;
+        pat[s] = code;
+    } else {                                    /* step record: the next step */
+        if (rec_fresh) { for (i = 0; i < 32u; i++) pat[i] = 0; rec_fresh = 0; }
+        if (rec_cursor < 32u) { pat[rec_cursor] = code; rec_cursor++; }
+    }
+}
+
+static void user_on(uint32_t note, uint32_t vel)
+{
+    if (arp_cmd == 2u && !(pmask[0] | pmask[1] | pmask[2] | pmask[3]))
+        lmask[0] = lmask[1] = lmask[2] = lmask[3] = 0;            /* HOLD: a new chord replaces the old one */
+    pmask[note >> 5] |= 1u << (note & 31u);
+    lmask[note >> 5] |= 1u << (note & 31u);
+    arp_dirty = 1;
+    if (rec_arm) rec_note(note, vel);
+    if (!arp_cmd) voice_on(note, vel);
+}
+static void user_off(uint32_t note)
+{
+    pmask[note >> 5] &= ~(1u << (note & 31u));
+    arp_dirty = 1;
+    if (!arp_cmd) voice_off(note);
+}
+
+static void engine_tick(void)                   /* every 16 frames */
+{
+    uint32_t step_len, arp_len, gl, bpm, swd, ac, wp, ra, i;
+    static const uint8_t ARPK[4] = {32, 16, 11, 8};             /* 1/8, 1/16, 1/16 triplet, 1/32 in 16ths of a step */
+
+    bpm = 60u + P[P_BPM];
+    step_len = 661500u / bpm;                   /* samples per 16th note: 44100 * 60 / 4 / bpm */
+    swd = (step_len * P[P_SWING]) >> 9;         /* the odd steps come late, up to a quarter step */
+    arp_len = (step_len * ARPK[P[P_ARPRATE] >> 5]) >> 4;
+    gl = 16u + ((uint32_t)P[P_GATE] * 112u >> 7);               /* gate 12..99 % in 128ths */
+    seq_len = 1u + (P[P_LEN] >> 2);
+    xp_cache = (int32_t)P[P_XPOSE] - 64;
+    xp_cache = xp_cache > 24 ? 24 : xp_cache < -24 ? -24 : xp_cache;
+
+    while (evq_r != evq_w) {                    /* events from the keys and MIDI */
+        uint32_t e = evq[evq_r & (EVQ - 1u)], type = e >> 14, vel = e >> 7 & 127u, note = e & 127u;
+        evq_r++;
+        if (type == EV_ON) user_on(note, vel);
+        else if (type == EV_OFF) user_off(note);
+        else if (type == EV_PANIC) {
+            voice_panic();
+            pmask[0] = pmask[1] = pmask[2] = pmask[3] = 0;
+            lmask[0] = lmask[1] = lmask[2] = lmask[3] = 0;
+            arp_cur = seq_cur = 0;
+            arp_dirty = 1;
+        } else if (type == EV_REST && rec_arm && !playing) {
+            if (rec_fresh) { for (i = 0; i < 32u; i++) pat[i] = 0; rec_fresh = 0; }
+            if (rec_cursor < 32u) pat[rec_cursor++] = 0;
+        }
+    }
+
+    ra = rec_arm;
+    if (ra && !prev_rec) { rec_cursor = 0; rec_fresh = !playing; }   /* arming: step record starts from a clean pattern */
+    prev_rec = ra;
+
+    ac = arp_cmd;
+    if (ac != prev_arp) {
+        if (!prev_arp) {                        /* the keys that sounded directly now belong to the arpeggiator */
+            for (i = 0; i < 128u; i++) if (pmask[i >> 5] >> (i & 31u) & 1u) voice_off(i);
+        }
+        if (!ac && arp_cur) { voice_off(arp_cur); arp_cur = 0; }
+        prev_arp = ac;
+        arp_dirty = 1;
+    }
+    if (arp_dirty || octs_seen != 1u + ((uint32_t)P[P_ARPOCT] * 3u >> 7)) { arp_dirty = 0; arp_build(); }
+
+    wp = want_play;
+    if (wp && !playing) {                       /* start: the first step plays at once */
+        seq_step = seq_len - 1u;
+        seq_cur_len = step_len + (((seq_len - 1u) & 1u) ? 0u - swd : swd);
+        seq_acc = seq_cur_len;
+        playing = 1;
+    } else if (!wp && playing) {
+        playing = 0;
+        if (seq_cur) { voice_off(seq_cur); seq_cur = 0; }
+    }
+
+    if (ac) {                                   /* the arpeggiator */
+        if (!an) { arp_acc = arp_len; an_prev = 0; }
+        else {
+            if (!an_prev) { aidx = P[P_ARPMODE] >> 5 == 1u ? an - 1u : 0; adir = 1; arp_acc = arp_len; }
+            an_prev = an;
+            arp_acc += 16u;
+            if (arp_acc >= arp_len) {
+                arp_acc -= arp_len;
+                if (arp_acc >= arp_len) arp_acc = 0;
+                arp_fire();
+                arp_off_at = (arp_len * gl) >> 7;
+            } else if (arp_cur && arp_acc >= arp_off_at) { voice_off(arp_cur); arp_cur = 0; }
+        }
+    }
+
+    if (playing) {                              /* the sequencer */
+        seq_acc += 16u;
+        if (seq_acc >= seq_cur_len) {
+            uint32_t s, n;
+            seq_acc -= seq_cur_len;
+            if (seq_acc >= step_len) seq_acc = 0;
+            if (seq_cur) { voice_off(seq_cur); seq_cur = 0; }
+            s = seq_step + 1u >= seq_len ? 0u : seq_step + 1u;
+            seq_step = s;
+            seq_cur_len = step_len + ((s & 1u) ? 0u - swd : swd);
+            seq_off_at = (seq_cur_len * gl) >> 7;
+            n = pat[s];
+            if (n & 127u) { seq_cur = clamp_note((int32_t)(n & 127u) + xp_cache); voice_on(seq_cur, n & 128u ? 127u : 90u); }
+        } else if (seq_cur && seq_acc >= seq_off_at) { voice_off(seq_cur); seq_cur = 0; }
+    }
+}
+
 /* ---- settings: the patch slots and the octave */
-#define SET_MAGIC 0xC7u
-static struct { uint8_t magic, cur; int8_t oct, pad; uint8_t slot[NPRESET][NP]; } set;
+#define SET_MAGIC 0xC8u
+static struct { uint8_t magic, cur; int8_t oct, pad; uint8_t slot[NPRESET][NPP], g[NP - NPP], pat[32]; } set;   /* 236 B of 256 */
 
 static uint32_t cur;                            /* current preset */
 static uint32_t edited;                         /* edited since loaded */
@@ -333,15 +523,15 @@ static uint32_t edited;                         /* edited since loaded */
 static void load_preset(uint32_t n)
 {
     uint32_t i;
-    panic();
+    push_ev(EV_PANIC, 0, 0);
     cur = n;
-    for (i = 0; i < NP; i++) P[i] = set.slot[n][i];
+    for (i = 0; i < NPP; i++) P[i] = set.slot[n][i];
     edited = 0;
 }
 static void set_param(uint32_t idx, int32_t val)
 {
     val = val < 0 ? 0 : val > 127 ? 127 : val;
-    if (P[idx] != val) { P[idx] = (uint8_t)val; edited = 1; }
+    if (P[idx] != val) { P[idx] = (uint8_t)val; if (idx < NPP) edited = 1; }   /* (the global ones are not part of a preset) */
 }
 
 /* ---- the screen: a neon HUD, the live scope, four knobs per page */
@@ -372,7 +562,15 @@ static void fmt_val(uint32_t idx, char *s)
     if (idx == P_LSHAPE) p = SHP[v >> 5];
     else if (idx == P_LDEST) p = DST[v * 3u >> 7];
     else if (idx == P_MODE) p = v >= 64u ? "MONO" : "POLY";
+    else if (idx == P_ARPMODE) { static const char *const AM[4] = {"UP", "DOWN", "UP-DN", "RAND"}; p = AM[v >> 5]; }
+    else if (idx == P_ARPRATE) { static const char *const AR[4] = {"1/8", "1/16", "1/16T", "1/32"}; p = AR[v >> 5]; }
     if (p) { do { *s++ = *p; } while (*p++); return; }
+    if (idx == P_ARPOCT) v = 1u + (v * 3u >> 7);
+    else if (idx == P_GATE) v = (16u + (v * 112u >> 7)) * 100u >> 7;
+    else if (idx == P_BPM) v = 60u + v;
+    else if (idx == P_SWING) v = 50u + v * 25u / 127u;
+    else if (idx == P_LEN) v = 1u + (v >> 2);
+    if (idx == P_XPOSE) { int32_t x = (int32_t)v - 64; itoa3(x > 24 ? 24 : x < -24 ? -24 : x, s); return; }
     itoa3(idx == P_ENVAMT || idx == P_TUNE ? (int32_t)v - 64 : (int32_t)v, s);
 }
 
@@ -391,7 +589,42 @@ static void draw_title(void)
     s[n] = 0;
     cv_rect(0, 36, 240, 1, C_PU);
     cv_text(8, 38, &FONT_S, s, C_YE);
+    {                                           /* right side: tempo, arp, transport, record */
+        char bpm[8];
+        const char *arp = arp_cmd == 2u ? "HLD" : "ARP";
+        int32_t x;
+        itoa3(60 + P[P_BPM], bpm);
+        x = 236 - text_w(&FONT_S, bpm) - (arp_cmd ? text_w(&FONT_S, arp) + 8 : 0) - (playing || want_play ? 17 : 0)
+            - (rec_arm ? text_w(&FONT_S, "REC") + 8 : 0);
+        x = cv_text(x, 38, &FONT_S, bpm, C_TX) + 8;
+        if (arp_cmd) x = cv_text(x, 38, &FONT_S, arp, C_CY) + 8;
+        if (playing || want_play) x = cv_text(x, 38, &FONT_S, ">", C_CY) + 8;
+        if (rec_arm) cv_text(x, 38, &FONT_S, "REC", C_MG);
+    }
     cv_blit(0, 0);
+}
+
+static void draw_seq(void)                      /* the pattern as a row of steps: bar height = pitch, yellow = accent */
+{
+    uint32_t s, len = 1u + (P[P_LEN] >> 2), mn = 255, mx = 0, curs = playing ? seq_step : 255u, rc = rec_arm && !playing ? rec_cursor : 255u;
+    for (s = 0; s < 32u; s++) {
+        uint32_t n = pat[s] & 127u;
+        if (n) { if (n < mn) mn = n; if (n > mx) mx = n; }
+    }
+    cv_begin(240, 64, BG);
+    for (s = 0; s < len && s < 32u; s++) {
+        int32_t x = (int32_t)(s & 15u) * 15 + 1, y = (int32_t)(s >> 4) * 32 + 2;
+        uint32_t n = pat[s] & 127u;
+        uint16_t edge = s == curs ? C_YE : s == rc ? C_MG : (s & 3u) == 0 ? C_PU : C_GR;
+        cv_rect(x, y, 13, 1, edge); cv_rect(x, y + 27, 13, 1, edge);
+        cv_rect(x, y, 1, 28, edge); cv_rect(x + 12, y, 1, 28, edge);
+        if (n) {
+            int32_t h = mx > mn ? 4 + (int32_t)((n - mn) * 20u / (mx - mn)) : 14;
+            cv_rect(x + 2, y + 26 - h, 9, h, pat[s] & 0x80u ? C_YE : s == curs ? C_WHITE : C_CY);
+        } else if (s == rc)
+            cv_rect(x + 3, y + 12, 7, 3, C_MG);
+    }
+    cv_blit(0, 56);
 }
 
 static void draw_scope(void)
@@ -431,9 +664,9 @@ static void draw_tabs(uint32_t page)
 {
     uint32_t t;
     cv_begin(240, 16, BG);
-    for (t = 0; t < 6u; t++) {
-        if (t == page) cv_rect((int32_t)t * 40, 0, 38, 16, C_CY);
-        cv_text((int32_t)t * 40 + 20 - text_w(&FONT_S, TAB[t]) / 2, 0, &FONT_S, TAB[t], t == page ? BG : C_PU);
+    for (t = 0; t < 8u; t++) {
+        if (t == page) cv_rect((int32_t)t * 30, 0, 29, 16, C_CY);
+        cv_text((int32_t)t * 30 + 15 - text_w(&FONT_S, TAB[t]) / 2, 0, &FONT_S, TAB[t], t == page ? BG : C_PU);
     }
     cv_blit(0, 206);
 }
@@ -456,12 +689,13 @@ static void draw_status(int32_t oct, const char *msg)
 }
 
 static const uint8_t CC_MAP[6][2] = {{74, P_CUT}, {71, P_RES}, {73, P_ATK}, {72, P_REL}, {1, P_LDEPTH}, {91, P_DMIX}};
+static const uint8_t PAT0[32] = {0xAD, 0, 45, 0, 48, 0, 45, 0, 43, 0, 43, 45, 0, 50, 0, 48};   /* a default line in A minor */
 
 static void app_main(void)
 {
     static const uint8_t PAGE_BTN[6] = {BTN_EDIT, BTN_SEL, BTN_ENV, BTN_LFO, BTN_FX, BTN_GLO};
     uint32_t prev = 0, k, t_scope = 0, t_stat = 0, t_change = 0, redraw = 1, page = 0, sel = 0, sel_drawn = 0;
-    uint32_t pending_save = 0, was_mono, lit_drawn = ~0u, edited_drawn = 0;
+    uint32_t pending_save = 0, was_mono, lit_drawn = ~0u, edited_drawn = 0, sig_drawn = ~0u;
     uint8_t shown[NP];
     int32_t oct_drawn = 99;
     uint8_t held[27] = {0};
@@ -472,8 +706,12 @@ static void app_main(void)
     if (set.magic != SET_MAGIC || set.cur >= NPRESET || set.oct < -2 || set.oct > 2) {
         uint32_t i, j;
         set.magic = SET_MAGIC; set.cur = 0; set.oct = 0; set.pad = 0;
-        for (i = 0; i < NPRESET; i++) for (j = 0; j < NP; j++) set.slot[i][j] = FACTORY[i][j];
+        for (i = 0; i < NPRESET; i++) for (j = 0; j < NPP; j++) set.slot[i][j] = FACTORY[i][j];
+        for (i = 0; i < NP - NPP; i++) set.g[i] = GLOBAL0[i];
+        for (i = 0; i < 32u; i++) set.pat[i] = PAT0[i];
     }
+    for (k = 0; k < NP - NPP; k++) P[NPP + k] = set.g[k];
+    for (k = 0; k < 32u; k++) pat[k] = set.pat[k];
     load_preset(set.cur);
     was_mono = (uint32_t)is_mono();
     for (k = 0; k < NP; k++) shown[k] = 255;
@@ -481,7 +719,7 @@ static void app_main(void)
     lcd_fill(0, 0, 240, 240, BG);
 
     for (;;) {
-        uint32_t keys, down, up, rel, b, lit = 0, base = (uint32_t)(KEY0 + 12 * set.oct), r;
+        uint32_t keys, down, up, rel, b, lit = 0, base = (uint32_t)(KEY0 + 12 * set.oct), r, sig;
         uint8_t st, d1, d2;
         int32_t d;
         platform_poll();
@@ -491,18 +729,36 @@ static void app_main(void)
         up = prev & ~keys;
         prev = keys;
         for (k = 0; k < 27u; k++) {
-            if (down >> k & 1u) { held[k] = (uint8_t)(base + k); note_on(held[k], 100); midi_send(0x90, held[k], 100); }
-            if (up >> k & 1u) { note_off(held[k]); midi_send(0x80, held[k], 0); }
+            if (down >> k & 1u) { held[k] = (uint8_t)(base + k); push_ev(EV_ON, held[k], 100); midi_send(0x90, held[k], 100); }
+            if (up >> k & 1u) { push_ev(EV_OFF, held[k], 0); midi_send(0x80, held[k], 0); }
         }
 
         b = fm1_input_edges(&rel);
         for (k = 0; k < 6u; k++)
             if (b & (1u << PAGE_BTN[k])) { page = k; redraw = 1; }
-        if (b & (1u << BTN_HOME)) panic();
+        if (b & (1u << BTN_ARP)) {              /* ARP: off -> on (and its page) -> hold -> off */
+            if (page != 6u) { page = 6; redraw = 1; if (!arp_cmd) arp_cmd = 1; }
+            else arp_cmd = (uint8_t)(arp_cmd == 0u ? 1u : arp_cmd == 1u ? 2u : 0u);
+        }
+        if (b & (1u << BTN_SEQ)) { page = 7; redraw = 1; }
+        if (b & (1u << BTN_PLAY)) want_play = (uint8_t)!want_play;
+        if (b & (1u << BTN_REC)) {              /* arm: the next notes are recorded; disarm: a step recording sets the length */
+            if (rec_arm) {
+                rec_arm = 0;
+                if (!playing && rec_cursor > 0u) set_param(P_LEN, (int32_t)(rec_cursor - 1u) * 4 + 1);
+                msg = "REC OFF"; t_msg = fm1_ms;
+            } else { rec_arm = 1; msg = "REC"; t_msg = fm1_ms; }
+        }
+        if (b & (1u << BTN_HOME)) {             /* a rest while step recording, else panic */
+            if (rec_arm && !playing) push_ev(EV_REST, 0, 0);
+            else push_ev(EV_PANIC, 0, 0);
+        }
         if (b & (1u << BTN_OCT_DOWN) && set.oct > -2) { set.oct--; pending_save = 1; t_change = fm1_ms; }
         if (b & (1u << BTN_OCT_UP) && set.oct < 2) { set.oct++; pending_save = 1; t_change = fm1_ms; }
-        if (b & (1u << BTN_SAVE)) {
-            for (k = 0; k < NP; k++) set.slot[cur][k] = P[k];
+        if (b & (1u << BTN_SAVE)) {             /* the preset slot, the global settings and the pattern */
+            for (k = 0; k < NPP; k++) set.slot[cur][k] = P[k];
+            for (k = 0; k < NP - NPP; k++) set.g[k] = P[NPP + k];
+            for (k = 0; k < 32u; k++) set.pat[k] = pat[k];
             set.cur = (uint8_t)cur; edited = 0; pending_save = 1; t_change = fm1_ms; redraw = 1;
             msg = "SAVED"; t_msg = fm1_ms;
         }
@@ -521,11 +777,11 @@ static void app_main(void)
             load_preset((uint32_t)(n < 0 ? (int32_t)NPRESET - 1 : n >= (int32_t)NPRESET ? 0 : n));
             redraw = 1;
         }
-        if ((uint32_t)is_mono() != was_mono) { was_mono = (uint32_t)is_mono(); panic(); }
+        if ((uint32_t)is_mono() != was_mono) { was_mono = (uint32_t)is_mono(); push_ev(EV_PANIC, 0, 0); }
 
         while (midi_get(&st, &d1, &d2)) {
-            if ((st & 0xF0u) == 0x90u && d2) note_on(d1, d2);
-            else if ((st & 0xF0u) == 0x80u || (st & 0xF0u) == 0x90u) note_off(d1);
+            if ((st & 0xF0u) == 0x90u && d2) push_ev(EV_ON, d1, d2);
+            else if ((st & 0xF0u) == 0x80u || (st & 0xF0u) == 0x90u) push_ev(EV_OFF, d1, 0);
             else if ((st & 0xF0u) == 0xB0u)
                 for (k = 0; k < 6u; k++)
                     if (CC_MAP[k][0] == d1) set_param(CC_MAP[k][1], d2);
@@ -540,11 +796,16 @@ static void app_main(void)
             for (k = 0; k < 27u; k++) fm1_led_key(KEY_LED(k), lit >> k & 1u);
         }
         for (k = 0; k < 6u; k++) fm1_led_key(PAGE_BTN[k], k == page);
+        fm1_led_key(BTN_ARP, arp_cmd != 0u);
+        fm1_led_key(BTN_SEQ, page == 7u);
+        fm1_led_key(BTN_PLAY, playing && (seq_step & 3u) == 0u);   /* blinks on the beat */
+        fm1_led_key(BTN_REC, rec_arm);
         fm1_led_key(BTN_OCT_DOWN, set.oct < 0);
         fm1_led_key(BTN_OCT_UP, set.oct > 0);
 
         /* the screen: only what changed */
-        if (redraw) { draw_title(); draw_tabs(page); for (k = 0; k < NP; k++) shown[k] = 255; redraw = 0; oct_drawn = 99; }
+        sig = arp_cmd | (playing ? 4u : 0u) | (rec_arm ? 8u : 0u) | (edited ? 16u : 0u) | (uint32_t)P[P_BPM] << 8;
+        if (redraw) { draw_title(); draw_tabs(page); for (k = 0; k < NP; k++) shown[k] = 255; redraw = 0; oct_drawn = 99; sig_drawn = sig; edited_drawn = edited; }
         for (r = 0; r < 4u; r++)
             if (shown[page * 4u + r] != P[page * 4u + r]) {
                 shown[page * 4u + r] = P[page * 4u + r];
@@ -554,15 +815,15 @@ static void app_main(void)
             sel_drawn = sel;
             for (r = 0; r < 4u; r++) shown[page * 4u + r] = 255;
         }
-        if (edited != edited_drawn) { edited_drawn = edited; draw_title(); }   /* the * after the preset name */
-        if (fm1_ms - t_scope >= 50u) { t_scope = fm1_ms; draw_scope(); }
+        if (sig != sig_drawn || edited != edited_drawn) { sig_drawn = sig; edited_drawn = edited; draw_title(); }
+        if (fm1_ms - t_scope >= 50u) { t_scope = fm1_ms; if (page == 7u) draw_seq(); else draw_scope(); }
         if (msg && fm1_ms - t_msg > 1500u) { msg = 0; oct_drawn = 99; }
         if (set.oct != oct_drawn || fm1_ms - t_stat >= 500u) {
             oct_drawn = set.oct; t_stat = fm1_ms;
             draw_status(set.oct, msg);
         }
 
-        if (pending_save && quiet() && fm1_ms - t_change > 1000u) {   /* an erase stalls the sound: only when silent */
+        if (pending_save && quiet() && !playing && fm1_ms - t_change > 1000u) {   /* an erase stalls the sound: only when silent */
             settings_save(&set, sizeof set);
             pending_save = 0;
         }
