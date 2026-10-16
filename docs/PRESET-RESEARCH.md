@@ -347,15 +347,15 @@ Avoid: ERH "choir a" and kklab5050 "Glass Bell" (CC-BY, credit needed), sgossner
 Free synths as a reference source (render one clean note to WAV for private fitting, keep the WAV out of the repo):
 
 - **Vital.** The EULA (<https://vital.audio/eula/>) lets you use it in commercial work and to make sample packs, but forbids redistributing unaltered factory presets, samples, wavetables and LFOs, and does not clearly cover modified ones. A rendered note used only as a local fit target and never shipped is the safe case; I am not a lawyer. A forum answer saying factory content is free to use commercially is a user's opinion, not Vital's.
-- **Surge XT.** The code is GPL-3 (<https://github.com/surge-synthesizer/surge>). I could not confirm the licence of the factory patches (no README in the patch folder shown to me, and each patch has its own licence field), so check the licence field in the patch dialog before you rely on one. Its factory folders include Keys, Pads, Winds, Plucks, FX, Basses, Brass: auditioning there for a Rhodes-like or bell-like starting point is fine; I did not verify any specific patch name.
+- **Surge XT.** The code is GPL-3 (<https://github.com/surge-synthesizer/surge>). I could not confirm the licence of the factory patches (no README in the factory patch folder, and each patch has its own licence field), so check the licence field in the patch dialog before you rely on one. Its factory folders include Keys, Pads, Winds, Plucks, FX, Basses, Brass: auditioning there for a Rhodes-like or bell-like starting point is fine; I did not verify any specific patch name.
 - **Your own recordings** are always the cleanest: a real Rhodes or e-piano note, a bowed or struck wine glass, a sung "ah" on one pitch, your own noise sweep from any synth you own. `DoppleDecker/docs/RECORDING_GUIDE.md` says how to record (one clean note, 2 to 3 s, no reverb or chorus, peaks between -12 and -3 dB), and `.\dd.ps1 record` is the recorder. The `samples/` folder there already has Kalimba, Moogy_Bass, Lead_Analog and others; I did not check where they came from.
 
 ---
 
 ## 9. What was checked
 
-Method. `git archive HEAD` of this repo into the session scratchpad (so the other session's uncommitted edits were never touched), `FACTORY` replaced by one candidate row, `cc -O2 -DDINGHY_HOST` build (the same flags as `tests/run_host.sh`), a script of `T midi 0x90 / 0x80` note lines, then analysis of the WAV in Python (peak, RMS, onset and release times, spectral centroid over time, band energies, DC, left/right balance, clipping).
-The scripts are in the scratchpad, not the repo. A write-up of results is in the shared notes folder.
+Method. `git archive HEAD` of this repo into a scratch directory (so the working tree was never touched), `FACTORY` replaced by one candidate row, `cc -O2 -DDINGHY_HOST` build (the same flags as `tests/run_host.sh`), a script of `T midi 0x90 / 0x80` note lines, then analysis of the WAV in Python (peak, RMS, onset and release times, spectral centroid over time, band energies, DC, left/right balance, clipping).
+The scratch scripts are not part of the repo.
 
 | Preset | Peak dBFS | Centroid Hz at the loudest part | Evolution | Band (0 to 150 / 150 to 600 / 0.6 to 2.5k / 2.5 to 8k / above 8k), dB re total |
 |---|---|---|---|---|
