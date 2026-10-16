@@ -38,7 +38,7 @@ enum { P_MIX, P_PW, P_DET, P_SUB,
 static volatile uint8_t P[NP];
 
 #define NPRESET 8u
-static const uint8_t GLOBAL0[NP - NPP] = {0, 20, 40, 80,   60, 0, 60, 64};   /* up, 1 oct, 1/16, gate 67 % | 120 bpm, no swing, 16 steps, +0 */
+static const uint8_t GLOBAL0[NP - NPP] = {0, 20, 64, 80,   60, 0, 60, 64};   /* up, 1 oct, 1/16, gate 67 % | 120 bpm, no swing, 16 steps, +0 */
 static const uint8_t FACTORY[NPRESET][NPP] = {
     /*        MIX PW DET SUB | CUT RES ENV DRV | ATK DEC SUS REL | LRT LDP LDS LSH | CRU DMX DTM DFB | GLD MOD TUN VEL */
     /* NEON RAIN   */ { 50, 64, 20, 30,   70, 30, 76, 20,   85, 90, 80,100,   25, 30, 10,  0,    0, 50, 70, 60,    0,  0, 64, 40},
@@ -256,6 +256,8 @@ static void app_audio(int32_t *out, uint32_t n)
                 int32_t pkn = (L < 0 ? -L : L) > (R < 0 ? -R : R) ? (L < 0 ? -L : L) : (R < 0 ? -R : R);
                 pk = pkn > pk ? pkn : pk - (pk >> 11);
             }
+            L = L > 65535 ? 65535 : L < -65535 ? -65535 : L;   /* (so that L * lgain fits in 32 bits; the limiter is a tick late) */
+            R = R > 65535 ? 65535 : R < -65535 ? -65535 : R;
             L = sclip((L * lgain) >> 15);
             R = sclip((R * lgain) >> 15);
             out[2u * (b + i)] += L;
@@ -279,6 +281,9 @@ static const uint32_t INC_C9[12] = {            /* MIDI 120..131; lower octaves 
 static uint32_t ages;
 static uint8_t stk[8], nstk;
 
+enum { SRC_KEY, SRC_ARP, SRC_SEQ };             /* who started a voice: a note off only ends its own */
+static uint8_t vsrc[NV];
+
 static uint32_t note_inc(uint32_t note)
 {
     uint32_t inc = INC_C9[note % 12u] >> (10u - note / 12u);
@@ -287,7 +292,7 @@ static uint32_t note_inc(uint32_t note)
 }
 static int is_mono(void) { return P[P_MODE] >= 64u; }
 
-static void voice_on(uint32_t note, uint32_t vel)
+static void voice_on(uint32_t note, uint32_t vel, uint32_t src)
 {
     uint32_t v, pick = 0, best = 0xFFFFFFFFu, i, j;
     if (note > 127u || !vel) return;
@@ -305,13 +310,14 @@ static void voice_on(uint32_t note, uint32_t vel)
         voice[0].gate = 1;
         return;
     }
-    for (v = 0; v < NV; v++) {                  /* same note, else a free voice, else a releasing one, else the oldest */
-        uint32_t score = voice[v].note == note && voice[v].gate ? 0u
+    for (v = 0; v < NV; v++) {                  /* same note and source, else a free voice, else a releasing one, else the oldest */
+        uint32_t score = voice[v].note == note && voice[v].gate && vsrc[v] == src ? 0u
                        : voice[v].stage == ST_OFF ? 1u
                        : !voice[v].gate ? 2u + ((uint32_t)voice[v].env >> 12)
                        : 0x80000000u + voice[v].age;
         if (score < best) { best = score; pick = v; }
     }
+    vsrc[pick] = (uint8_t)src;
     voice[pick].note = (uint8_t)note;
     voice[pick].vel = (uint8_t)vel;
     voice[pick].age = ++ages;
@@ -319,7 +325,7 @@ static void voice_on(uint32_t note, uint32_t vel)
     voice[pick].gate = 1;
     voice[pick].trig++;
 }
-static void voice_off(uint32_t note)
+static void voice_off(uint32_t note, uint32_t src)
 {
     uint32_t v, i, j;
     if (is_mono()) {
@@ -328,12 +334,21 @@ static void voice_off(uint32_t note)
         if (nstk) {                             /* back to the previous held key, legato */
             voice[0].note = stk[nstk - 1u];
             voice[0].inc_t = note_inc(stk[nstk - 1u]);
-        } else
+        } else {
+#ifdef DINGHY_HOST
+            if (voice[0].gate) printf("%6u ms  voice off %3u\n", fm1_ms, note);
+#endif
             voice[0].gate = 0;
+        }
         return;
     }
     for (v = 0; v < NV; v++)
-        if (voice[v].note == note) voice[v].gate = 0;
+        if (voice[v].note == note && vsrc[v] == src && voice[v].gate) {
+#ifdef DINGHY_HOST
+            printf("%6u ms  voice off %3u\n", fm1_ms, note);                 /* (one line per voice released) */
+#endif
+            voice[v].gate = 0;
+        }
 }
 static void voice_panic(void)
 {
@@ -378,9 +393,9 @@ static void arp_build(void)                     /* the notes of the chord, low t
 {
     const uint32_t *src = arp_cmd == 2u ? lmask : pmask;
     uint32_t octs = 1u + ((uint32_t)P[P_ARPOCT] * 3u >> 7), o, nt, n = 0;
-    for (o = 0; o < octs; o++)
-        for (nt = 0; nt < 128u && n < 32u; nt++)
-            if ((src[nt >> 5] >> (nt & 31u) & 1u) && nt + 12u * o <= 127u) alist[n++] = (uint8_t)(nt + 12u * o);
+    for (nt = 0; nt < 128u && n < 32u; nt++)    /* a note is in when it, or it an octave or two down, is held */
+        for (o = 0; o < octs && 12u * o <= nt; o++)
+            if (src[(nt - 12u * o) >> 5] >> ((nt - 12u * o) & 31u) & 1u) { alist[n++] = (uint8_t)nt; break; }
     an = n;
     octs_seen = octs;
     if (aidx >= an) aidx = 0;
@@ -389,11 +404,11 @@ static void arp_build(void)                     /* the notes of the chord, low t
 static void arp_fire(void)
 {
     uint32_t mode = P[P_ARPMODE] >> 5, pos = aidx;
-    if (arp_cur) { voice_off(arp_cur); arp_cur = 0; }
+    if (arp_cur) { voice_off(arp_cur, SRC_ARP); arp_cur = 0; }
     if (!an) return;
     if (pos >= an) pos = 0;
     arp_cur = alist[pos];
-    voice_on(arp_cur, 100);
+    voice_on(arp_cur, 100, SRC_ARP);
     if (an < 2u) { aidx = 0; return; }
     if (mode == 0u) aidx = pos + 1u >= an ? 0 : pos + 1u;                              /* up */
     else if (mode == 1u) aidx = pos == 0 ? an - 1u : pos - 1u;                         /* down */
@@ -421,30 +436,30 @@ static void rec_note(uint32_t note, uint32_t vel)
 
 static void user_on(uint32_t note, uint32_t vel)
 {
-    if (arp_cmd == 2u && !(pmask[0] | pmask[1] | pmask[2] | pmask[3]))
-        lmask[0] = lmask[1] = lmask[2] = lmask[3] = 0;            /* HOLD: a new chord replaces the old one */
+    if (!(pmask[0] | pmask[1] | pmask[2] | pmask[3]))         /* lmask is the last chord: a new one replaces it */
+        lmask[0] = lmask[1] = lmask[2] = lmask[3] = 0;           /* (in every arp mode, so HOLD latches only that) */
     pmask[note >> 5] |= 1u << (note & 31u);
     lmask[note >> 5] |= 1u << (note & 31u);
     arp_dirty = 1;
     if (rec_arm) rec_note(note, vel);
-    if (!arp_cmd) voice_on(note, vel);
+    if (!arp_cmd) voice_on(note, vel, SRC_KEY);
 }
 static void user_off(uint32_t note)
 {
     pmask[note >> 5] &= ~(1u << (note & 31u));
     arp_dirty = 1;
-    if (!arp_cmd) voice_off(note);
+    if (!arp_cmd) voice_off(note, SRC_KEY);
 }
 
 static void engine_tick(void)                   /* every 16 frames */
 {
     uint32_t step_len, arp_len, gl, bpm, swd, ac, wp, ra, i;
-    static const uint8_t ARPK[4] = {32, 16, 11, 8};             /* 1/8, 1/16, 1/16 triplet, 1/32 in 16ths of a step */
+    static const uint8_t ARPK[5] = {192, 96, 48, 32, 24};       /* 1/4, 1/8, 1/16, 1/16 triplet, 1/32 in 48ths of a step */
 
     bpm = 60u + P[P_BPM];
     step_len = 661500u / bpm;                   /* samples per 16th note: 44100 * 60 / 4 / bpm */
-    swd = (step_len * P[P_SWING]) >> 9;         /* the odd steps come late, up to a quarter step */
-    arp_len = (step_len * ARPK[P[P_ARPRATE] >> 5]) >> 4;
+    swd = (step_len * P[P_SWING]) >> 8;         /* the odd steps come late, up to half a step (swing 50..75 %) */
+    arp_len = step_len * ARPK[(uint32_t)P[P_ARPRATE] * 5u >> 7] / 48u;
     gl = 16u + ((uint32_t)P[P_GATE] * 112u >> 7);               /* gate 12..99 % in 128ths */
     seq_len = 1u + (P[P_LEN] >> 2);
     xp_cache = (int32_t)P[P_XPOSE] - 64;
@@ -474,9 +489,9 @@ static void engine_tick(void)                   /* every 16 frames */
     ac = arp_cmd;
     if (ac != prev_arp) {
         if (!prev_arp) {                        /* the keys that sounded directly now belong to the arpeggiator */
-            for (i = 0; i < 128u; i++) if (pmask[i >> 5] >> (i & 31u) & 1u) voice_off(i);
+            for (i = 0; i < 128u; i++) if (pmask[i >> 5] >> (i & 31u) & 1u) voice_off(i, SRC_KEY);
         }
-        if (!ac && arp_cur) { voice_off(arp_cur); arp_cur = 0; }
+        if (!ac && arp_cur) { voice_off(arp_cur, SRC_ARP); arp_cur = 0; }
         prev_arp = ac;
         arp_dirty = 1;
     }
@@ -490,11 +505,14 @@ static void engine_tick(void)                   /* every 16 frames */
         playing = 1;
     } else if (!wp && playing) {
         playing = 0;
-        if (seq_cur) { voice_off(seq_cur); seq_cur = 0; }
+        if (seq_cur) { voice_off(seq_cur, SRC_SEQ); seq_cur = 0; }
     }
 
     if (ac) {                                   /* the arpeggiator */
-        if (!an) { arp_acc = arp_len; an_prev = 0; }
+        if (!an) {                              /* all keys up: the last note still ends at its gate */
+            if (arp_cur && (arp_acc += 16u) >= arp_off_at) { voice_off(arp_cur, SRC_ARP); arp_cur = 0; }
+            an_prev = 0;
+        }
         else {
             if (!an_prev) { aidx = P[P_ARPMODE] >> 5 == 1u ? an - 1u : 0; adir = 1; arp_acc = arp_len; }
             an_prev = an;
@@ -504,7 +522,7 @@ static void engine_tick(void)                   /* every 16 frames */
                 if (arp_acc >= arp_len) arp_acc = 0;
                 arp_fire();
                 arp_off_at = (arp_len * gl) >> 7;
-            } else if (arp_cur && arp_acc >= arp_off_at) { voice_off(arp_cur); arp_cur = 0; }
+            } else if (arp_cur && arp_acc >= arp_off_at) { voice_off(arp_cur, SRC_ARP); arp_cur = 0; }
         }
     }
 
@@ -514,14 +532,14 @@ static void engine_tick(void)                   /* every 16 frames */
             uint32_t s, n;
             seq_acc -= seq_cur_len;
             if (seq_acc >= step_len) seq_acc = 0;
-            if (seq_cur) { voice_off(seq_cur); seq_cur = 0; }
+            if (seq_cur) { voice_off(seq_cur, SRC_SEQ); seq_cur = 0; }
             s = seq_step + 1u >= seq_len ? 0u : seq_step + 1u;
             seq_step = s;
             seq_cur_len = step_len + ((s & 1u) ? 0u - swd : swd);
             seq_off_at = (seq_cur_len * gl) >> 7;
             n = pat[s];
-            if (n & 127u) { seq_cur = clamp_note((int32_t)(n & 127u) + xp_cache); voice_on(seq_cur, n & 128u ? 127u : 90u); }
-        } else if (seq_cur && seq_acc >= seq_off_at) { voice_off(seq_cur); seq_cur = 0; }
+            if (n & 127u) { seq_cur = clamp_note((int32_t)(n & 127u) + xp_cache); voice_on(seq_cur, n & 128u ? 127u : 90u, SRC_SEQ); }
+        } else if (seq_cur && seq_acc >= seq_off_at) { voice_off(seq_cur, SRC_SEQ); seq_cur = 0; }
     }
 }
 
@@ -575,7 +593,7 @@ static void fmt_val(uint32_t idx, char *s)
     else if (idx == P_LDEST) p = DST[v * 3u >> 7];
     else if (idx == P_MODE) p = v >= 64u ? "MONO" : "POLY";
     else if (idx == P_ARPMODE) { static const char *const AM[4] = {"UP", "DOWN", "UP-DN", "RAND"}; p = AM[v >> 5]; }
-    else if (idx == P_ARPRATE) { static const char *const AR[4] = {"1/8", "1/16", "1/16T", "1/32"}; p = AR[v >> 5]; }
+    else if (idx == P_ARPRATE) { static const char *const AR[5] = {"1/4", "1/8", "1/16", "1/16T", "1/32"}; p = AR[v * 5u >> 7]; }
     if (p) { do { *s++ = *p; } while (*p++); return; }
     if (idx == P_ARPOCT) v = 1u + (v * 3u >> 7);
     else if (idx == P_GATE) v = (16u + (v * 112u >> 7)) * 100u >> 7;
@@ -741,6 +759,12 @@ static void app_main(void)
     uint32_t t_msg = 0;
 
     settings_load(&set, sizeof set);
+    {                                           /* every knob 0..127: the tables index by them (other Dinghy forks share the sector) */
+        uint8_t bad = 0;
+        for (k = 0; k < NPRESET * NPP; k++) bad |= set.slot[k / NPP][k % NPP];
+        for (k = 0; k < NP - NPP; k++) bad |= set.g[k];
+        if (bad & 0x80u) set.magic = 0;
+    }
     if (set.magic != SET_MAGIC || set.cur >= NPRESET || set.oct < -2 || set.oct > 2) {
         uint32_t i, j;
         set.magic = SET_MAGIC; set.cur = 0; set.oct = 0; set.pad = 0;

@@ -134,8 +134,8 @@ Pressing **ARP** again while on its page steps through **ON** (`ARP`), **HOLD** 
 | Knob | Parameter | Choices |
 |---|---|---|
 | 1 | ARP MODE | **UP**, **DOWN**, **UP-DN**, **RAND** |
-| 2 | OCTAVES | 1, 2 or 3: the chord repeats an octave higher |
-| 3 | RATE | **1/8**, **1/16**, **1/16T** (triplet), **1/32** |
+| 2 | OCTAVES | 1, 2 or 3: the chord repeats an octave higher (the notes still play low to high) |
+| 3 | RATE | **1/4**, **1/8**, **1/16**, **1/16T** (triplet), **1/32** |
 | 4 | GATE | Note length as a percentage of the step (about 12 to 99 %) |
 
 The tempo, gate and swing are shared with the sequencer (see below).

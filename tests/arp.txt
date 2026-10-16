@@ -1,0 +1,35 @@
+# The arpeggiator's corners, checked by tests/check_arp.py (120 bpm, default patch):
+#   .\fm1.ps1 host cyberdeck tests/arp.txt > build\host\arp-trace.txt ; python tests\check_arp.py build\host\arp-trace.txt
+#
+# A  ARP on, a chord, all keys up during a note's gate: that note ends at its gate (it used to sound on forever)
+100 btn 10
+300 keys 0x81
+960 keys 0
+# B  ARP on: play F3, G3 and let go; hold C4 and switch to HOLD: only C4 is latched (F3 and G3 used to come back)
+1200 keys 0x1
+1400 keys 0
+1600 keys 0x4
+1800 keys 0
+2000 keys 0x80
+2200 btn 10
+2400 keys 0
+3500 btn 10
+# C  the sequencer plays A2 (45) while MIDI holds A2 too: the sequencer's note off leaves the held one sounding
+4000 btn 12
+4010 midi 0x90 45 100
+4600 midi 0x80 45 0
+4700 btn 12
+# D  RATE 1/4 (a beat, 500 ms), then 1/16T (83.3 ms: three in the time of two sixteenths)
+5000 btn 10
+5100 enc 4 -30
+5200 keys 0x80
+7400 enc 4 15
+9700 keys 0
+# E  OCTAVES 2 with F3 + C5 (more than an octave apart): UP plays low to high, 53 65 72 84
+9800 enc 4 -4
+9850 enc 3 6
+9900 keys 0x80001
+11000 keys 0
+11200 btn 10
+11300 btn 10
+11500 end
