@@ -81,6 +81,7 @@ static voice_t voice[NV];
 #define SCOPE_N 2048u
 static int16_t scope[SCOPE_N];
 static volatile uint32_t scope_w, cpu_pct;
+static volatile uint32_t vis_pk, vis_trig;     /* for the scenes: the output peak, and a count of the notes struck (ISR writes, main reads) */
 
 #define DLEN 32768u
 static int16_t dlL[DLEN] __attribute__((section(".pool")));
@@ -130,6 +131,7 @@ static void app_audio(int32_t *out, uint32_t n)
 
             if (V->trig != V->seen) {           /* a new note */
                 V->seen = V->trig;
+                vis_trig = vis_trig + 1u;
                 if (st == ST_OFF) { V->pa = V->pb = V->ps = 0; V->ic1 = V->ic2 = 0; }
                 st = ST_ATK;
                 V->fenv = ONE;
@@ -264,6 +266,7 @@ static void app_audio(int32_t *out, uint32_t n)
             out[2u * (b + i) + 1u] += R;
             scope[scope_w++ & (SCOPE_N - 1u)] = (int16_t)((L + R) >> 1);
         }
+        vis_pk = (uint32_t)pk;
     }
 
     {   /* CPU: the worst block of the last 64, in percent of 256 frames (5805 us) */
@@ -747,34 +750,79 @@ static void mutate(void)
 
 static const uint8_t PAT0[32] = {0xAD, 0, 45, 0, 48, 0, 45, 0, 43, 0, 43, 45, 0, 50, 0, 48};   /* a default line in A minor */
 
+#include "scenes.h"
+
+/* ---- start up: the settings and the patch load while the loading screen runs, one stage per label */
+static void init_stage(uint32_t n)
+{
+    uint32_t k;
+    if (n == 0u) {                              /* SETTINGS */
+        settings_load(&set, sizeof set);
+        {                                       /* every knob 0..127: the tables index by them (other Dinghy forks share the sector) */
+            uint8_t bad = 0;
+            for (k = 0; k < NPRESET * NPP; k++) bad |= set.slot[k / NPP][k % NPP];
+            for (k = 0; k < NP - NPP; k++) bad |= set.g[k];
+            if (bad & 0x80u) set.magic = 0;
+        }
+        if (set.magic != SET_MAGIC || set.cur >= NPRESET || set.oct < -2 || set.oct > 2) {
+            uint32_t i, j;
+            set.magic = SET_MAGIC; set.cur = 0; set.oct = 0; set.pad = 0;      /* (pad: the view, 0 parameters, 1 scenes) */
+            for (i = 0; i < NPRESET; i++) for (j = 0; j < NPP; j++) set.slot[i][j] = FACTORY[i][j];
+            for (i = 0; i < NP - NPP; i++) set.g[i] = GLOBAL0[i];
+            for (i = 0; i < 32u; i++) set.pat[i] = PAT0[i];
+        }
+    } else {                                    /* OSCILLATORS: the patch, the globals and the pattern */
+        for (k = 0; k < NP - NPP; k++) P[NPP + k] = set.g[k];
+        for (k = 0; k < 32u; k++) pat[k] = set.pat[k];
+        load_preset(set.cur);
+    }
+}
+
+#ifdef DINGHY_HOST
+#define SPLASH_MS host_splash_ms                /* (the tests have none unless the script asks: "2600 splash") */
+#else
+#define SPLASH_MS 2600u
+#endif
+static void boot_splash(void)                   /* the logo over a neon sunset, a progress bar; any button skips it */
+{
+    static const char *const STEP[3] = {"LOADING SETTINGS", "TUNING OSCILLATORS", "READY"};
+    uint32_t t0 = fm1_ms, dur = SPLASH_MS, done = 0, t_draw = 0, rel;
+    lcd_fill(0, 0, 240, 240, BG);
+    sc_strip_i = 0;
+    while (dur) {
+        uint32_t e, p, step;
+        platform_poll();
+        e = fm1_ms - t0;
+        if (e >= dur || fm1_input_edges(&rel)) break;
+        p = e * 118u / dur;
+        p = p > 100u ? 100u : p;
+        step = p >= 100u ? 2u : p >= 50u ? 1u : 0u;
+        while (done < 2u && done <= step) init_stage(done++);
+        sc_fade = e < 500u ? e * 256u / 500u : 256u;                     /* fades up, and the picture settles: */
+        sc_gl = e < 1100u ? (1100u - e) * 255u / 1100u : 0u;             /* it tears at first, */
+        sc_roll = e < 450u ? (450u - e) * 240u / 450u : 0u;              /* rolls like a tube, */
+        if (e - t_draw < 8u && e > 2u) continue;
+        t_draw = e;
+        sc_step(SC_BOOT, e, p, STEP[step]);
+    }
+    while (done < 2u) init_stage(done++);       /* skipped, or no splash: the same start-up */
+    sc_fade = 256u; sc_gl = 0; sc_roll = 0; sc_strip_i = 0;
+}
+
 static void app_main(void)
 {
     static const uint8_t PAGE_BTN[6] = {BTN_EDIT, BTN_SEL, BTN_ENV, BTN_LFO, BTN_FX, BTN_GLO};
     uint32_t prev = 0, k, t_scope = 0, t_stat = 0, t_change = 0, redraw = 1, page = 0, sel = 0, sel_drawn = 0;
-    uint32_t pending_save = 0, was_mono, lit_drawn = ~0u, edited_drawn = 0, sig_drawn = ~0u, home_t = 0, home_long = 0;
+    uint32_t pending_save = 0, was_mono, lit_drawn = ~0u, edited_drawn = 0, sig_drawn = ~0u, home_t = 0, home_long = 0, tap_t = 0;
+    uint32_t show_vis, vis_drawn = 0, vpg = 99;
     uint8_t shown[NP];
     int32_t oct_drawn = 99;
     uint8_t held[27] = {0};
     const char *msg = 0;
     uint32_t t_msg = 0;
 
-    settings_load(&set, sizeof set);
-    {                                           /* every knob 0..127: the tables index by them (other Dinghy forks share the sector) */
-        uint8_t bad = 0;
-        for (k = 0; k < NPRESET * NPP; k++) bad |= set.slot[k / NPP][k % NPP];
-        for (k = 0; k < NP - NPP; k++) bad |= set.g[k];
-        if (bad & 0x80u) set.magic = 0;
-    }
-    if (set.magic != SET_MAGIC || set.cur >= NPRESET || set.oct < -2 || set.oct > 2) {
-        uint32_t i, j;
-        set.magic = SET_MAGIC; set.cur = 0; set.oct = 0; set.pad = 0;
-        for (i = 0; i < NPRESET; i++) for (j = 0; j < NPP; j++) set.slot[i][j] = FACTORY[i][j];
-        for (i = 0; i < NP - NPP; i++) set.g[i] = GLOBAL0[i];
-        for (i = 0; i < 32u; i++) set.pat[i] = PAT0[i];
-    }
-    for (k = 0; k < NP - NPP; k++) P[NPP + k] = set.g[k];
-    for (k = 0; k < 32u; k++) pat[k] = set.pat[k];
-    load_preset(set.cur);
+    boot_splash();
+    show_vis = set.pad & 1u;
     was_mono = (uint32_t)is_mono();
     for (k = 0; k < NP; k++) shown[k] = 255;
 
@@ -817,36 +865,43 @@ static void app_main(void)
             push_ev(EV_PANIC, 0, 0);
             msg = "PANIC"; t_msg = fm1_ms;
         }
-        if (rel & (1u << BTN_HOME)) {           /* tapped: a rest while step recording, else mutate the patch */
+        if (rel & (1u << BTN_HOME)) {           /* tapped: a rest while step recording; twice: mutate; once, if no second tap comes: the view */
             if (home_t && !home_long) {
                 if (rec_arm && !playing) push_ev(EV_REST, 0, 0);
-                else { mutate(); msg = "MUTATED"; t_msg = fm1_ms; }
+                else if (tap_t && fm1_ms - tap_t < 320u) { tap_t = 0; mutate(); msg = "MUTATED"; t_msg = fm1_ms; }
+                else tap_t = fm1_ms;
             }
             home_t = 0;
         }
-        if (b & (1u << BTN_OCT_DOWN) && set.oct > -2) { set.oct--; pending_save = 1; t_change = fm1_ms; }
-        if (b & (1u << BTN_OCT_UP) && set.oct < 2) { set.oct++; pending_save = 1; t_change = fm1_ms; }
+        if (tap_t && fm1_ms - tap_t >= 320u) {  /* parameters <-> scenes */
+            tap_t = 0; show_vis ^= 1u; sc_strip_i = 0; sc_touch = 0; redraw = 1;
+            set.pad = (uint8_t)show_vis;        /* (kept by the next SAVE: the view you left is the view you come back to) */
+            msg = show_vis ? "SCENES" : "PARAMETERS"; t_msg = fm1_ms;
+        }
+        if (b & (1u << BTN_OCT_DOWN) && set.oct > -2) { set.oct--; pending_save = 1; t_change = fm1_ms; msg = "OCTAVE"; t_msg = fm1_ms; }
+        if (b & (1u << BTN_OCT_UP) && set.oct < 2) { set.oct++; pending_save = 1; t_change = fm1_ms; msg = "OCTAVE"; t_msg = fm1_ms; }
         if (b & (1u << BTN_SAVE)) {             /* the preset slot, the global settings and the pattern */
             for (k = 0; k < NPP; k++) set.slot[cur][k] = P[k];
             for (k = 0; k < NP - NPP; k++) set.g[k] = P[NPP + k];
             for (k = 0; k < 32u; k++) set.pat[k] = pat[k];
-            set.cur = (uint8_t)cur; edited = 0; pending_save = 1; t_change = fm1_ms; redraw = 1;
+            set.cur = (uint8_t)cur; set.pad = (uint8_t)show_vis; edited = 0; pending_save = 1; t_change = fm1_ms; redraw = 1;
             msg = "SAVED"; t_msg = fm1_ms;
         }
 
         for (k = 0; k < 4u; k++) {              /* the four knobs of the page */
             d = fm1_enc_take(ENC_KNOB1 + k);
-            if (d) { set_param(page * 4u + k, (int32_t)P[page * 4u + k] + d * (d > 2 || d < -2 ? 6 : 2)); sel = k; }
+            if (d) { set_param(page * 4u + k, (int32_t)P[page * 4u + k] + d * (d > 2 || d < -2 ? 6 : 2)); sel = k; sc_touch = k + 1u; sc_touch_ms[k] = fm1_ms; }
         }
         d = fm1_enc_take(ENC_ALGORITHM);
-        if (d) set_param(P_CUT, (int32_t)P[P_CUT] + d * (d > 2 || d < -2 ? 6 : 2));
+        if (d) { set_param(P_CUT, (int32_t)P[P_CUT] + d * (d > 2 || d < -2 ? 6 : 2)); msg = "CUTOFF"; t_msg = fm1_ms; }
         d = fm1_enc_take(ENC_SELECT);
-        if (d) set_param(P_RES, (int32_t)P[P_RES] + d * (d > 2 || d < -2 ? 6 : 2));
+        if (d) { set_param(P_RES, (int32_t)P[P_RES] + d * (d > 2 || d < -2 ? 6 : 2)); msg = "RESONANCE"; t_msg = fm1_ms; }
         d = fm1_enc_take(ENC_PRESETS);
         if (d) {
             int32_t n = (int32_t)cur + (d > 0 ? 1 : -1);
             load_preset((uint32_t)(n < 0 ? (int32_t)NPRESET - 1 : n >= (int32_t)NPRESET ? 0 : n));
             redraw = 1;
+            msg = PNAME[cur]; t_msg = fm1_ms;
         }
         if ((uint32_t)is_mono() != was_mono) { was_mono = (uint32_t)is_mono(); push_ev(EV_PANIC, 0, 0); }
 
@@ -874,24 +929,40 @@ static void app_main(void)
         fm1_led_key(BTN_OCT_DOWN, set.oct < 0);
         fm1_led_key(BTN_OCT_UP, set.oct > 0);
 
-        /* the screen: only what changed */
-        sig = arp_cmd | (playing ? 4u : 0u) | (rec_arm ? 8u : 0u) | (edited ? 16u : 0u) | (uint32_t)P[P_BPM] << 8;
-        if (redraw) { draw_title(); draw_tabs(page); for (k = 0; k < NP; k++) shown[k] = 255; redraw = 0; oct_drawn = 99; sig_drawn = sig; edited_drawn = edited; }
-        for (r = 0; r < 4u; r++)
-            if (shown[page * 4u + r] != P[page * 4u + r]) {
-                shown[page * 4u + r] = P[page * 4u + r];
-                draw_row(page, r, sel);
-            }
-        if (sel != sel_drawn) {                 /* the highlight follows the last turned knob */
-            sel_drawn = sel;
-            for (r = 0; r < 4u; r++) shown[page * 4u + r] = 255;
-        }
-        if (sig != sig_drawn || edited != edited_drawn) { sig_drawn = sig; edited_drawn = edited; draw_title(); }
-        if (fm1_ms - t_scope >= 50u) { t_scope = fm1_ms; if (page == 7u) draw_seq(); else draw_scope(); }
         if (msg && fm1_ms - t_msg > 1500u) { msg = 0; oct_drawn = 99; }
-        if (set.oct != oct_drawn || fm1_ms - t_stat >= 500u) {
-            oct_drawn = set.oct; t_stat = fm1_ms;
-            draw_status(set.oct, msg);
+        sc_msg = msg;
+        if (sc_touch && fm1_ms - sc_touch_ms[sc_touch - 1u] > 1500u) sc_touch = 0;
+        if (show_vis) {                         /* the scene: one strip of it per pass */
+            if (vpg != page) { vpg = page; sc_strip_i = 0; sc_touch = 0; }
+#ifdef DINGHY_HOST
+            static uint32_t t_strip;
+            if (fm1_ms - t_strip >= 8u) { t_strip = fm1_ms; sc_step(page, 0, 0, 0); }     /* (about what the screen link manages) */
+#else
+            sc_step(page, 0, 0, 0);
+#endif
+            vis_drawn = 1;
+        } else {
+            if (vis_drawn) {                    /* back from the scene: the parameters again */
+                vis_drawn = 0; lcd_fill(0, 0, 240, 240, BG); redraw = 1; oct_drawn = 99; t_stat = fm1_ms - 1000u; vpg = 99;
+            }
+            /* the screen: only what changed */
+            sig = arp_cmd | (playing ? 4u : 0u) | (rec_arm ? 8u : 0u) | (edited ? 16u : 0u) | (uint32_t)P[P_BPM] << 8;
+            if (redraw) { draw_title(); draw_tabs(page); for (k = 0; k < NP; k++) shown[k] = 255; redraw = 0; oct_drawn = 99; sig_drawn = sig; edited_drawn = edited; }
+            for (r = 0; r < 4u; r++)
+                if (shown[page * 4u + r] != P[page * 4u + r]) {
+                    shown[page * 4u + r] = P[page * 4u + r];
+                    draw_row(page, r, sel);
+                }
+            if (sel != sel_drawn) {                 /* the highlight follows the last turned knob */
+                sel_drawn = sel;
+                for (r = 0; r < 4u; r++) shown[page * 4u + r] = 255;
+            }
+            if (sig != sig_drawn || edited != edited_drawn) { sig_drawn = sig; edited_drawn = edited; draw_title(); }
+            if (fm1_ms - t_scope >= 50u) { t_scope = fm1_ms; if (page == 7u) draw_seq(); else draw_scope(); }
+            if (set.oct != oct_drawn || fm1_ms - t_stat >= 500u) {
+                oct_drawn = set.oct; t_stat = fm1_ms;
+                draw_status(set.oct, msg);
+            }
         }
 
         if (pending_save && quiet() && !playing && fm1_ms - t_change > 1000u) {   /* an erase stalls the sound: only when silent */

@@ -8,6 +8,8 @@ HUD with a live oscilloscope, and a HOME button that nudges the patch somewhere 
 
 <p align="center"><img src="docs/screen.png" width="240" alt="CYBERDECK's screen: the title, preset NEON RAIN, the oscilloscope, the four OSC knobs and the page tabs"></p>
 
+<p align="center"><img src="docs/scenes.png" width="720" alt="The eight scenes: OSC city, FLT corridor, ENV rain, LFO waves, FX glitch, GLO radar, ARP mesh, SEQ sunset"></p>
+
 > **Version 1.0.** Package identity `FM-1_960`. The user manual is **[docs/MANUAL.md](docs/MANUAL.md)**.
 
 ## What it does
@@ -19,7 +21,8 @@ HUD with a live oscilloscope, and a HOME button that nudges the patch somewhere 
 | **Effects** | Bit crusher, ping-pong delay with tape-style time smearing, an output limiter |
 | **Arpeggiator** | Up, down, up-down, random; 1 to 3 octaves; 1/4, 1/8, 1/16, 1/16 triplet, 1/32; gate; HOLD |
 | **Sequencer** | 32 steps with accents, swing, transpose; step record and overdub |
-| **Mutate** | Tap HOME: four to six knobs take a bounded random step, so the patch stays playable |
+| **Mutate** | Double-tap HOME: four to six knobs take a bounded random step, so the patch stays playable |
+| **Scenes** | Tap HOME: every page becomes a neon scene (a city in the rain, a grid corridor, a radar...) with its parameters drawn as light: the filter's curve, the envelope, the echoes, the pattern as a skyline. A loading screen opens the firmware. The art is made in EffectCraft ([assets/art](assets/art)) |
 | **Saving** | 8 patch slots, the global settings and the pattern, kept in flash |
 | **USB** | MIDI in (notes, velocity, six CCs) and out (the keys), and a 16-bit stereo audio input for your computer |
 
@@ -32,7 +35,7 @@ HUD with a live oscilloscope, and a HOME button that nudges the patch somewhere 
 | **ALGORITHM**, **SELECT** | Cutoff and resonance, on every page |
 | **PRESETS**, **SAVE** | Choose a patch; store it |
 | **PLAY**, **REC** | Start/stop the pattern; record (step record when stopped, overdub when playing) |
-| **HOME** | Tap: mutate (a rest while step recording). Hold: panic |
+| **HOME** | Tap: parameters <-> scenes. Double-tap: mutate (a tap is a rest while step recording). Hold: panic |
 | **OCT- / OCT+** | Octave, plus or minus two |
 
 Everything else is in the [manual](docs/MANUAL.md).
@@ -52,9 +55,9 @@ risk; back up your presets first.
 
 ## Build it
 
-The app is [firmware/src/cyberdeck.c](firmware/src/cyberdeck.c). Next to it, `platform.c` and `hal/` are the Felucca /
+The app is [firmware/src/cyberdeck.c](firmware/src/cyberdeck.c) and the scenes are [firmware/src/scenes.h](firmware/src/scenes.h). Next to them, `platform.c` and `hal/` are the Felucca /
 SLOOP platform as Dinghy carries it (boot, USB, updates, the audio interrupt, settings), and `tables.h` is written by
-`tools/gen_tables.py`.
+`tools/gen_tables.py`; the scene art is `firmware/gen/art_plates.h`, made by `tools/make_art.ps1` (below).
 
 You need Linux on x86-64 (or WSL, or Docker on macOS), Python 3 with Pillow, the JieLi toolchain and three files of the
 JieLi AC79 SDK. Set up once:
@@ -88,7 +91,9 @@ every voice that starts and stops.
 | --- | --- |
 | `tests/demo.txt` | A chord on NEON RAIN with the filter and delay moving, then the mono bass |
 | `tests/seq.txt` | The arpeggiator and HOLD, step recording a line, playing it back |
-| `tests/mutate.txt` | Mutation after mutation over an arpeggio |
+| `tests/mutate.txt` | Mutation after mutation (double taps on HOME) over an arpeggio |
+| `tests/scenes.txt` | The loading screen, then every page as a scene, with a chord and knobs turned (screen shots) |
+| `tests/scenes_stress.txt` | Every scene with every knob at both ends, chords, arp, recording: it must not crash or read out of range |
 | `tests/arp.txt` | The arpeggiator's corners; checked by `tests/check_arp.py` |
 
 ```sh

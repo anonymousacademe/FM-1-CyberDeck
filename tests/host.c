@@ -88,7 +88,7 @@ static void app_audio(int32_t *out, uint32_t n);
 static void app_main(void);
 
 /* the script: at t ms, keys down (bit k = key k, 0 = F3), a button edge, a MIDI message. A script file (the second
- * argument) replaces it, a line each: "T keys MASK" (hex or decimal), "T btn ID [MS]", "T enc ID N", "T shot", "T midi ST D1 D2", "T end" */
+ * argument) replaces it, a line each: "T keys MASK" (hex or decimal), "T btn ID [MS]", "T enc ID N", "T shot", "T splash", "T midi ST D1 D2", "T end" */
 typedef struct { uint32_t t, keys; int btn; uint8_t st, d1, d2; } host_ev_t;
 static const host_ev_t SCRIPT0[] = {
     {200, 1u << 7, -1, 0, 0, 0},                                /* C4 */
@@ -101,6 +101,7 @@ static const host_ev_t SCRIPT0[] = {
     {3400, 0, -1, 0, 0, 0},
 };
 static const host_ev_t *script = SCRIPT0;
+static uint32_t host_splash_ms;                 /* "T splash": run the loading screen for T ms before the app starts */
 static uint32_t script_n = sizeof SCRIPT0 / sizeof SCRIPT0[0], end_ms = 6500, frame_fps;
 static uint32_t SHOT[16] = {1000, 3000}, shot_n = 2;
 
@@ -117,6 +118,7 @@ static void read_script(const char *path)
         unsigned a = 0, b = 0, c = 0;
         if (line[0] == '#' || sscanf(line, "%u %15s", &e.t, what) != 2) continue;
         if (!strcmp(what, "end")) { end_ms = e.t; continue; }
+        if (!strcmp(what, "splash")) { host_splash_ms = e.t; continue; }
         if (!strcmp(what, "shot")) { if (!shot_script) { shot_n = 0; shot_script = 1; } if (shot_n < 16u) SHOT[shot_n++] = e.t; continue; }
         if (!strcmp(what, "keys")) { sscanf(line, "%*u %*s %i", (int *)&e.keys); }
         else if (!strcmp(what, "enc")) { int id = 0, dn = 0; sscanf(line, "%*u %*s %d %d", &id, &dn); e.btn = 100 + id; e.keys = (uint32_t)dn; }

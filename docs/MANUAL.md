@@ -13,7 +13,7 @@ Package identity `FM-1_960` · GPL-3.0-only · built on Felucca (Leo Kuroshita),
 2. Turn **PRESETS** to hear the other seven patches.
 3. Turn **ALGORITHM** (cutoff) and **SELECT** (resonance) to shape the sound live.
 4. Press **PLAY** to hear the built-in bassline. Hold a chord with **ARP** on to arpeggiate it.
-5. Tap **HOME** for a surprise.
+5. Tap **HOME** to see every page as a neon scene, and tap it twice for a surprise (mutate).
 
 ## 2. The screen
 
@@ -24,6 +24,30 @@ Package identity `FM-1_960` · GPL-3.0-only · built on Felucca (Leo Kuroshita),
 | Four bars | The four knobs of the current page, with their values. The last knob you turned is highlighted in yellow |
 | Tab row | OSC FLT ENV LFO FX GLO ARP SEQ, the current page lit |
 | Bottom line | `CPU` load, `POLY`/`MONO`, octave, and short messages (SAVED, MUTATED, REC...) |
+
+That is the **parameter view**. **HOME** (one tap) switches every page to its **scene** (section 2.1), and back.
+
+On switching on, a loading screen (the logo over a neon sunset) runs for about two and a half seconds while the settings load. Any button skips it.
+
+### 2.1 The scenes
+
+Every page has a scene: a picture drawn in EffectCraft (the plates, `assets/art/`), lit in neon, with the page's four knobs drawn over it
+as light. The four knobs and their values are along the bottom, the knob you just turned and its value on the top line. The keys,
+knobs and MIDI work exactly as in the parameter view; HOME remembers the view with **SAVE**.
+
+| Page | Scene | What is drawn over it |
+|---|---|---|
+| **OSC** | rainy city | The oscillators' wave: saw, pulse and sub as they add up (MIX, PULSE W, SUB), the detuned one beating behind it (DETUNE) |
+| **FLT** | grid corridor | The filter's curve: cutoff, resonance peak, the 12 dB slope |
+| **ENV** | rain | The amplitude envelope (ATTACK, DECAY, SUSTAIN, RELEASE), with a light travelling along it |
+| **LFO** | wobbling lines | The LFO's shape and depth, how many cycles fit (RATE), its target in the corner |
+| **FX** | digital glitch | The echoes: ping-pong taps that die away (DLY MIX, DLY TIME, FEEDBACK). CRUSH reduces the picture's colours |
+| **GLO** | radar | A sweeping arm; a blip for every sounding note |
+| **ARP** | neon mesh | The chord as a ring of lights; the note that is sounding burns |
+| **SEQ** | sunset | The pattern as a skyline: bar height is pitch, yellow bars are accents, the bright one is the playhead |
+
+The picture follows what you play: every note flashes and heats the colours and tears bands of the picture sideways with a red/blue split,
+the grid floors fly towards you faster the louder it is, and the palette ripples all the time.
 
 ## 3. Controls
 
@@ -40,7 +64,7 @@ Package identity `FM-1_960` · GPL-3.0-only · built on Felucca (Leo Kuroshita),
 | **PRESETS** | Choose one of 8 patches |
 | **SAVE** | Store your work (section 8) |
 | **PLAY**, **REC** | Transport and record (section 7) |
-| **HOME** | Tap: mutate the patch. Hold: panic (all notes off). While step recording: enter a rest |
+| **HOME** | Tap: parameters <-> scenes. Double-tap: mutate the patch. Hold: panic (all notes off). While step recording: a tap enters a rest |
 
 ## 4. The sound engine
 
@@ -175,6 +199,7 @@ The sequencer is a mono pattern of up to **32 steps** (sixteenth notes). **SEQ**
 - the global settings (arp, tempo, swing, length, transpose)
 - the **pattern**
 - the octave
+- the view (parameters or scenes)
 
 Notes:
 
@@ -185,7 +210,7 @@ Notes:
 
 ## 9. Mutate
 
-Tap **HOME** for a random walk of the current patch: four to six knobs move a little, and the LFO's target and shape may jump.
+Tap **HOME** twice (quickly) for a random walk of the current patch: four to six knobs move a little, and the LFO's target and shape may jump.
 Every knob has limits so the result stays playable (no eight-second attacks, the filter never shuts fully, feedback stays safe).
 Mode, tuning and the global settings are never changed.
 
@@ -211,7 +236,8 @@ It works while you play, so you can mutate and listen. If you like it, **SAVE**.
 
 - **Crash**: a red screen shows where, then the FM-1 restarts. After two boot crashes it enters **USB rescue** by itself.
 - **Won't start / want another firmware**: hold **OCT-** while switching on (USB rescue), then install from the FM-1 Firmware Hub in Chrome or Edge (https://fm1.designburgapps.com), or run `.\fm1.ps1 install <project>` from the project folder.
-- **Crackling**: watch the CPU figure on the bottom line. If it stays near 100 %, reduce the number of notes or the drive. (In testing it stays well under half.)
+- **Choppy picture or sluggish keys in the scenes**: switch back to the parameters (tap HOME); the sound is not affected either way.
+- **Crackling**: watch the CPU figure on the bottom line (parameter view). If it stays near 100 %, reduce the number of notes or the drive. (In testing it stays well under half.)
 - Installing firmware is at your own risk. Back up presets and projects before switching firmwares.
 
 ## 12. Credits and license

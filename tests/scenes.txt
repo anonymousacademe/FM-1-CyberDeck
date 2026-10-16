@@ -1,0 +1,29 @@
+# The scenes: the loading screen, then each page as a scene (HOME tap = the scenes), a chord, knobs turned.
+#   .\fm1.ps1 host cyberdeck tests/scenes.txt
+2600 splash
+2700 btn 8 40
+700 shot
+1500 shot
+2300 shot
+3300 shot
+3400 keys 0x4081
+3700 shot
+3800 enc 2 -10
+4000 btn 3 40
+4200 enc 2 12
+4600 shot
+4800 btn 4 40
+5200 shot
+5400 btn 5 40
+6000 shot
+6200 btn 2 40
+6700 shot
+6900 btn 7 40
+7400 shot
+7600 btn 10 40
+7900 keys 0x4081
+8600 shot
+8800 btn 11 40
+9500 shot
+9700 keys 0
+9800 end
