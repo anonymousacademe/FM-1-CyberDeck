@@ -14,6 +14,9 @@ committed engine (`git HEAD`) through the host build, see section 8 for what tha
   is an FM patch, which CYBERDECK has no operators to play. MLdeck has the learned oscillator and noise, but it is a different firmware
   (its presets 9 to 16 are already the "futuristic" set: AURORA PAD, SUPERSAW, NEON BRASS, GLASS PLUCK, HYPER BASS, ORBIT CHOIR, STARDUST, VOID DRONE).
   So a (B) sound ends up in DoppleDecker or MLdeck, or in CYBERDECK only after a new engine feature.
+- **Correction after looking at the Firmware Hub (section 10):** "out of reach" above means out of reach for *CYBERDECK's engine*, not for the FM-1.
+  Other firmwares on the hub already run six-operator FM with DX7 import, a Juno chorus, a cathedral reverb, noise, a 12-bit sampler and many engines on this same chip.
+  The (B) list is therefore a list of features to port or build, and the cheapest route for several of them is existing GPL code, not a sample match.
 - **A finding that blocks "just add rows":** the settings block is 236 of the 256 bytes the platform allows
   (`set` in `cyberdeck.c`: 4 + 8 x 24 + 8 + 32). One more saved preset costs 24 bytes, so **no** extra preset fits as it is. See 6.2.
 - **Decisions for you:** (1) how to store more than 8 presets (6.2), (2) which of the 16 to take, (3) whether a reverb is worth building (it
@@ -230,6 +233,7 @@ HOOVER     { 60, 64, 40, 60,  95, 35, 64, 45,  0, 90, 118, 40,  100, 70, 100, 0,
 ## 5. (B) candidates: what is missing and the route
 
 None of these can go into CYBERDECK's FACTORY table today. The "route" is where the sound would be built.
+Read this table together with section 10: the Firmware Hub shows that the FM-1 hardware can do all of these, so each "lacks" is a CYBERDECK feature gap, and porting an existing engine is a real alternative to the routes listed here.
 
 | Candidate | What the engine lacks | Better route | Why |
 |---|---|---|---|
@@ -386,3 +390,30 @@ These are knob distances, not a sound comparison.
 
 **Not verified:** anything by ear; whether any preset resembles its target (no reference audio was compared); a real-hardware run (nothing was built for the device or flashed, and the on-device CPU load of a 4-voice chord with the delay was not measured); the HOOVER legato pitch drop;
 the dependence on key tracking across the whole keyboard (each preset was run only in its range); mutate (HOME) on the new rows; save and reload (blocked by 6.2); other octaves of the same preset. Fixes needed before shipping: choose the storage option in 6.2, add the names, update the manual's section 5 table.
+
+---
+
+## 10. What the Firmware Hub changes (added after review)
+
+Source: <https://thefirmwarehub.com/> (read 2026-10-16). It lists about 50 FM-1 firmwares; the page gives no per-firmware links, so I could not open most of the projects. Descriptions below are the hub's own one-liners, plus what a web search turned up where noted.
+The first version of this note treated CYBERDECK's engine as the limit of what the FM-1 can do. The hub shows it is not.
+
+What the hub says exists on this hardware, relevant to the (B) list:
+
+| Need (from section 5) | Already on the hub | Licence / access |
+|---|---|---|
+| FM electric piano, glass bells, FM bass | **SLOOP** (isod89) has a six-operator FM engine ported from Dexed that imports DX7 SysEx (one voice or a 32-voice bank); v2.5 per its release page adds two engines, 77 sounds, a drum synth, 48 kHz USB audio. Hub entries: **sloopDX** (zvenson, "SLOOP with a DX7 engine inside"), **SLOOP Floyd FM** (four-operator, visual), **SLOOP DX7 Banks** (majnikool, twelve banks), **Melodee** (CZ-1 and Dexed), **Baud Girl FM-1+VA** (FM engines, virtual analog, 64-step sequencer) | GPL-3.0 for the open ones (the hub says so; the SLOOP wiki confirms it for SLOOP). Baud Girl and Groove OS are closed. The licence of the individual DX7 banks was not checked |
+| Chorus (Juno pads, Nightcall, VP-330 ensemble) | **FM-106** (PatttF), "Juno-106 emulation" | Repo not found by search, not verified |
+| Reverb (the Lexicon 224 tail on everything in Blade Runner) | **GHOULBOX** (Jason Persinger), "dungeon synth with cathedral reverb and hurdy-gurdy" (a Matrixsynth post of 2026-10-10 covers it) | Repo not found by search, not verified |
+| Noise, drones, many engines | **Jangada** ("dark drones and ten engines"), **Skiff** ("fourteen engines"), **AMB-1** (generative ambient), **ETCH** (drawn waveforms), **zp12** (12-bit sampler) | not checked |
+| Choir / vowels, plucked and struck acoustic models | **ChoralRoot**, **FiMba-1** (kalimba model), **FoMni**, **fm1-chord** | not checked |
+
+What this means for the plan:
+
+1. **(B) is a feature list for CYBERDECK, not a wall.** The cheapest way to get the FM electric piano and bells into CYBERDECK is probably to port SLOOP's FM6 voice (GPL-3.0 into a GPL-3.0 project, credits kept as CLAUDE.md requires) rather than fit patches with DoppleDecker, and a DX7 e-piano or bell patch can be loaded directly instead of being fitted to a recording.
+   DoppleDecker's fitting is still the route for a sound that has no DX7 equivalent. That is a reading of the hub, not something I tested: I did not open SLOOP's source, so the size of the port, its CPU cost and whether it fits beside the CYBERDECK voice engine are unknown.
+2. **Reverb and chorus are the two features that lift the most (A) presets.** CS80 BRASS, VP STRINGS, NIGHT DRONE, JUP SWEEP and RISER all name a reverb as the missing piece; NIGHTCALL, NARROW ARP and OUTRUN PAD name the chorus. If either exists as open source on the hub (GHOULBOX, FM-106), reading it for the memory and CPU it takes is the next step. CYBERDECK's pool already holds 128 KB of delay lines in 336 KB.
+3. **The hub is the right place to look for genre material too.** Dark drones (Jangada), generative ambient (AMB-1), dungeon synth with a cathedral reverb (GHOULBOX) and a Juno emulation (FM-106) are all close to the cyberpunk / Blade Runner brief; hearing them shows what the same box does in other hands.
+4. **Section 6 stands as the quick win** (16 subtractive recipes, no engine change), but the storage limit in 6.2 and the missing reverb are now the main constraints, not the sound list.
+
+Suggested next steps, if you want them (none started): (a) read SLOOP's FM6 source and the GHOULBOX / FM-106 sources for size and CPU, and (b) decide whether CYBERDECK gets a reverb, a chorus, or an FM voice first; I would pick the reverb, because it helps more of the 16 presets than the other two.
