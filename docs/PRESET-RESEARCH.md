@@ -17,6 +17,7 @@ committed engine (`git HEAD`) through the host build, see section 8 for what tha
 - **Correction after looking at the Firmware Hub (section 10):** "out of reach" above means out of reach for *CYBERDECK's engine*, not for the FM-1.
   Other firmwares on the hub already run six-operator FM with DX7 import, a Juno chorus, a cathedral reverb, noise, a 12-bit sampler and many engines on this same chip.
   The (B) list is therefore a list of features to port or build, and the cheapest route for several of them is existing GPL code, not a sample match.
+  Section 10.1 has the source read: a CS-80 firmware (CS-1) with Blade Runner tones already exists, and SLOOP's reverb and chorus (19 KB + 4 KB, about 70 lines) ported into a scratch copy of CYBERDECK, built for the device and measured.
 - **A finding that blocks "just add rows":** the settings block is 236 of the 256 bytes the platform allows
   (`set` in `cyberdeck.c`: 4 + 8 x 24 + 8 + 32). One more saved preset costs 24 bytes, so **no** extra preset fits as it is. See 6.2.
 - **Decisions for you:** (1) how to store more than 8 presets (6.2), (2) which of the 16 to take, (3) whether a reverb is worth building (it
@@ -416,4 +417,65 @@ What this means for the plan:
 3. **The hub is the right place to look for genre material too.** Dark drones (Jangada), generative ambient (AMB-1), dungeon synth with a cathedral reverb (GHOULBOX) and a Juno emulation (FM-106) are all close to the cyberpunk / Blade Runner brief; hearing them shows what the same box does in other hands.
 4. **Section 6 stands as the quick win** (16 subtractive recipes, no engine change), but the storage limit in 6.2 and the missing reverb are now the main constraints, not the sound list.
 
-Suggested next steps, if you want them (none started): (a) read SLOOP's FM6 source and the GHOULBOX / FM-106 sources for size and CPU, and (b) decide whether CYBERDECK gets a reverb, a chorus, or an FM voice first; I would pick the reverb, because it helps more of the 16 presets than the other two.
+### 10.1 Source read: what the code says (2026-10-16)
+
+Repos read (shallow clones into the session scratchpad, read only, nothing run from them), all GPL-3.0-only unless noted:
+[isod89/sloop-fm1](https://github.com/isod89/sloop-fm1) (commit `ba54ba5`, SLOOP 2.7), [jasonpersinger/ghoulbox-fm1-dungeon-synth](https://github.com/jasonpersinger/ghoulbox-fm1-dungeon-synth),
+[PatttF/fm-106](https://github.com/PatttF/fm-106), [zvenson/dxsloop](https://github.com/zvenson/dxsloop) (cloned, not read beyond its layout), [twochannels/CS-1](https://github.com/twochannels/CS-1).
+The link list came from the community index <https://github.com/cicloid/awesome-fm-1>.
+
+**1. A CS-80 firmware already exists: CS-1.** Its README describes eight two-channel voices (saw / pulse with PWM / noise per channel), a resonant high-pass and low-pass in series, filter and amp envelopes, touch response,
+a stereo chorus/tremolo, a phaser, a tape delay and a Dattorro plate reverb, 52 sounds. Its Vangelis group is named BLADE BRASS, BR BLUES, BR FLUTE, BR STRINGS, END TITLES, CHIMES, BRASS SWELL and so on, and a further group
+(TYRELL TOWER, RAIN ON NEON, ICE BELLS, BELL TOWER, GLASS ORGAN, MUSIC BOX, RISING BRASS...) is converted from CS-80 V plugin presets. I read the README only; I did not listen to it or compare its values.
+For the top item of this note, CS80 BRASS, the realistic answer on the FM-1 is "run CS-1", and CYBERDECK's row is the cheap approximation. One caution if anything is copied from it: the converted group derives from a commercial plugin's presets (its own README says so), so check its `LICENSING.md` before reusing those values.
+
+**2. Reverb and chorus are small and already written, in GPL code.**
+
+| Piece | Where | Size | Notes |
+|---|---|---|---|
+| Reverb, "ROOM" | `sloop-fm1/firmware/src/fx.c` `fx_buses` | 4 delay lines of 1559 / 1931 / 2389 / 2791 samples + 2 diffusers of 556 / 441 = 9,667 int16 = **19.3 KB**, about 60 lines | Hadamard feedback network, one line slowly modulated, damping in the loop, decay by `RSIZE`; also has a FREEZE mode |
+| Chorus | same function | 2,048 int16 = **4 KB**, about 12 lines | two modulated 5 to 15 ms reads, LFO half a turn apart, stereo |
+| Reverb "HALL" | `ghoulbox-fm1-dungeon-synth/firmware/src/fx.c` `rev_hall` | reuses the back half of the 64 K delay buffer, no RAM of its own | a Dattorro figure-eight tank, 1.5 s to 12 s |
+| Plate reverb with shimmer | `CS-1/firmware/src/cs1_fx.h` | not sized | Dattorro plate |
+| BBD stereo chorus (Juno I, II) | `fm-106/firmware/src/fm106_chorus.h` | not read in detail | the engine comes from `ultramaster_kr106`; its licence and the origin of the 128 presets (decoded from Juno SysEx) were not checked |
+
+**3. I ported the SLOOP reverb and chorus into a scratch copy of CYBERDECK (git HEAD) and measured.** Mono in from the voice sum, stereo out added before the limiter, per-sample, parameters fixed at compile time.
+Host build and a device build (compiled only, never flashed):
+
+| | Baseline | + reverb | + chorus | + both |
+|---|---|---|---|---|
+| Device image | 66,208 B | | | 67,116 B (+908 B, of 581,564) |
+| Device RAM (.data + .bss) | 17,232 B | | | 17,312 B (+80 B, of 98,304) |
+| Device pool | 161,792 B | | | 185,252 B (+23,460 B, of 344,064) |
+| Host render time, 60 s of a 4-voice chord (best of 5) | 0.122 s | 0.149 s (+22 %) | 0.127 s (+4 %) | 0.152 s (+24 %) |
+
+- **Memory is not the problem**: 23 KB of the 182 KB of spare pool.
+- **CPU is probably not either, but this is a ratio measured on a PC, not on the FM-1.** The reverb costs about a fifth of what CYBERDECK's four voices cost; if the device's load is a third of the 5.8 ms block, that is about 7 points more.
+  The real figure needs the CPU readout on the device. The FM-1 also has a **second core**: SLOOP, FM-106, CS-1 and X0X all run audio on it (`sloop-fm1/DUALCORE.md`: one real pattern went from 31 % to 23 % CPU with it on). CYBERDECK uses one core, so there is headroom beyond this estimate.
+- **Decay** (a short chord pluck, delay off, SIZE knob as in SLOOP): SIZE 40 under 1 s, 64 about 1.2 s, 90 about 2 s, 127 about 5 to 6 s, read off the envelope; the floor of the measurement is about -50 to -63 dB.
+- **Two things to carry over when porting.** (a) The reverb loop leaves a constant DC residue (about -72 dBFS, 8 LSB, measured as a pure offset in the tail); SLOOP removes it with an always-on DC blocker at the master (`dc_block` in `fx.c`), CYBERDECK has none. (b) With reverb at mix 64 and the delay on, the loud chords reached -0.4 dBFS peak before the limiter: the wet level needs its own trim.
+- **Not tested:** listening, the effect on real presets' feel, my substitute for SLOOP's sine LFO (a parabola), the cost with the second core, the on-device CPU.
+
+**4. FM: the DX7 engine is a port of Dexed's msfa (Apache-2.0, kept in the file header), 564 + 392 lines in SLOOP** (`fm6_core.c`, `eng_fm6.c`). A sounding note is 244 bytes, so six notes are 1.5 KB; the tables are constants in flash.
+It renders one operator at a time over a 32-sample block, skips operators below a threshold, and has one 64-bit multiply per operator per sample (CYBERDECK's filter has four per sample per voice).
+My estimate from that is that a six-operator voice costs about the same as a CYBERDECK voice, and a four-voice FM patch about as much as the present four-voice subtractive engine, but **I did not measure it**: the port needs tables and framework files from SLOOP that I did not pull in.
+It imports DX7 SysEx banks, so an e-piano or a bell would be a loaded patch, not a fit. Apache-2.0 code inside a GPL-3.0-only firmware is allowed, with the notices kept.
+
+**5. What this does to the ranked list (section 3).**
+
+| Item | Before | Now |
+|---|---|---|
+| REVERB WASH | B, feature | **Port, about 60 lines, 23 KB pool, measured above**; lifts CS80 BRASS, VP STRINGS, NIGHT DRONE, JUP SWEEP, RISER |
+| Chorus (NIGHTCALL, NARROW ARP, OUTRUN PAD, VP STRINGS) | missing | **Port, about 12 lines, 4 KB, +4 % host cost** |
+| TEARS EP, GLASS BELL | B, DoppleDecker, cannot load | **Port the FM6 voice and load a DX7 patch** (or run SLOOP / CS-1 for them today) |
+| CS80 BRASS | A, approximate | **CS-1 exists**; keep the row as the cheap version |
+| NOISE RISER, wind | B, MLdeck | SLOOP and CS-1 both have a noise source (`eng_noise.c`, noise per channel), so this is also a port |
+| CHOIR | B, MLdeck | SLOOP has a FORMANT engine (`eng_formant.c`, 241 lines); not read |
+
+### 10.2 Recommendation
+
+1. Do the **reverb first** (about 60 lines, measured, helps the most presets), with the DC blocker; then the **chorus**. Both are GPL code from the same family as CYBERDECK's own platform, so the credits are already in `LICENSING.md`.
+2. Add the **16 subtractive rows** (section 6) after the storage decision (6.2), and give the pad rows a REVERB amount: a global (no preset bytes) or one byte per preset.
+3. Treat **FM** as a second project: port FM6, then bring in e-piano and bell patches by loading DX7 banks. Measure the FM6 voice first.
+4. For listening references, run **CS-1** (Vangelis tones) and **GHOULBOX / Jangada** (dark, reverb-heavy) on the device, or in the browser emulators the CS-1 README mentions, before deciding which of my 16 rows are still worth a slot.
+5. Whichever is chosen, read the CPU figure on the device (bottom line) with 4 notes held; that is the one number I could not get.
