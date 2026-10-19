@@ -1,0 +1,16 @@
+# TWO-PART MODE with the arpeggiator and a MIDI keyboard (tests/check_layer.py):
+# the layer is CHROME BASS (mono), the keys NEON RAIN (poly)
+100 enc 6 1
+200 btn 11 800
+1200 enc 6 -1
+# a tap on ARP acts when it is let go; then two keys: the arpeggio plays in the layer, the keys do not sound
+1400 btn 10
+1600 keys 0x81
+3000 keys 0
+# ARP to HOLD, then off
+3100 btn 10
+3300 btn 10
+# MIDI in with the arpeggiator off: the keys' part
+3500 midi 0x90 60 100
+3800 midi 0x80 60 0
+4500 end

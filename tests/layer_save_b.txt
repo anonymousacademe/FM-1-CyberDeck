@@ -1,0 +1,5 @@
+# after the power cycle: the layer is still on (keys tagged part A) and the screen names both patches
+500 keys 0x81
+900 shot
+1500 keys 0
+2000 end

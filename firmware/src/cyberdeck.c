@@ -36,6 +36,9 @@ enum { P_MIX, P_PW, P_DET, P_SUB,
        NP };
 #define NPP 24u                                 /* params per preset */
 static volatile uint8_t P[NP];
+static volatile uint8_t PB[NPP];                /* TWO-PART MODE: the layer's patch (the sequencer and the arpeggiator play it); the keys play P */
+static volatile uint8_t layer;                  /* 1: two parts (main writes; the engine latches it once per tick: lay_now) */
+static uint8_t lay_now;                         /* the layer flag, latched once per tick (engine_tick) */
 
 #define NPRESET 8u
 static const uint8_t GLOBAL0[NP - NPP] = {0, 20, 64, 80,   60, 0, 60, 64};   /* up, 1 oct, 1/16, gate 67 % | 120 bpm, no swing, 16 steps, +0 */
@@ -71,6 +74,7 @@ enum { ST_OFF, ST_ATK, ST_DEC, ST_REL };
 typedef struct {
     volatile uint32_t inc_t;                    /* target phase step (main -> ISR) */
     volatile uint8_t gate, trig, vel, note;
+    volatile uint8_t part;                      /* 0: plays the keys' patch (P), 1: the layer's (PB) */
     volatile uint8_t stage;                     /* ISR writes, main reads */
     uint8_t seen;
     uint32_t age, inc, pa, pb, ps;              /* phase steps / accumulators */
@@ -82,6 +86,7 @@ static voice_t voice[NV];
 static int16_t scope[SCOPE_N];
 static volatile uint32_t scope_w, cpu_pct;
 static volatile uint32_t vis_pk, vis_trig;     /* for the scenes: the output peak, and a count of the notes struck (ISR writes, main reads) */
+static volatile int32_t bend;                  /* MIDI pitch bend, -8192..8191, about +-2 semitones (main writes, ISR reads) */
 
 #define DLEN 32768u
 static int16_t dlL[DLEN] __attribute__((section(".pool")));
@@ -100,13 +105,14 @@ static void engine_tick(void);
 
 static void app_audio(int32_t *out, uint32_t n)
 {
-    static uint32_t lph, rnd = 0x1234567u, dw, crush_n;
-    static int32_t lfo, sh, dt_cur = 20000, lpL, lpR, held, pk, lgain = 32768;
+    static uint32_t lph, rnd = 0x1234567u, dw, crush_n, lphB, crush_nB;
+    static int32_t lfo, sh, dt_cur = 20000, lpL, lpR, held, pk, lgain = 32768, lfoB, shB, heldB;
     static uint32_t cpu_max, cpu_blk;
     uint32_t t0 = fm1_ticks(), b, v, i;
 
     for (b = 0; b < n; b += 16u) {
-        int32_t mono[16], m, dtt;
+        int32_t mono[16], monb[16], m, mB, dtt;
+        uint32_t lay, destB = 0, mono_modeB = 0;
         uint32_t prev_lph = lph, shape = P[P_LSHAPE] >> 5, dest = (uint32_t)P[P_LDEST] * 3u >> 7;
         uint32_t mono_mode = P[P_MODE] >= 64u;
         int32_t ldep = P[P_LDEPTH];
@@ -121,6 +127,22 @@ static void app_audio(int32_t *out, uint32_t n)
         }
 
         engine_tick();                          /* events, arpeggiator, sequencer: they start and stop voices */
+        lay = lay_now;                          /* two parts: while the layer is on, and while its last notes still ring */
+        for (v = 0; v < NV; v++) if (voice[v].part && voice[v].stage != ST_OFF) lay = 1;
+        if (lay) {                              /* the layer's own LFO, once per tick */
+            uint32_t prev_b = lphB, shape_b = PB[P_LSHAPE] >> 5;
+            int32_t ldep_b = PB[P_LDEPTH];
+            destB = (uint32_t)PB[P_LDEST] * 3u >> 7;
+            mono_modeB = PB[P_MODE] >= 64u;
+            lphB += LFO_INC[PB[P_LRATE]];
+            if (lphB < prev_b) { rnd ^= rnd << 13; rnd ^= rnd >> 17; rnd ^= rnd << 5; shB = (int32_t)(rnd >> 16) - 32768; }
+            {
+                int32_t sb = (int32_t)lphB >> 16;
+                lfoB = shape_b == 0u ? ((sb < 0 ? -sb : sb) << 1) - 32767 : shape_b == 1u ? sb : shape_b == 2u ? (sb < 0 ? -32767 : 32767) : shB;
+                lfoB = (lfoB * ldep_b) >> 7;
+            }
+            for (i = 0; i < 16u; i++) monb[i] = 0;
+        } else { lphB = lph; shB = sh; }        /* (while there is no layer its LFO follows the keys': a layer starts as a copy, in step) */
         for (i = 0; i < 16u; i++) mono[i] = 0;
 
         for (v = 0; v < NV; v++) {
@@ -128,6 +150,9 @@ static void app_audio(int32_t *out, uint32_t n)
             uint32_t st = V->stage, inc, incb, pa, pb, ps, wph, a1, a2, a3, g, k, gk, den;
             int32_t env, ei, de, fenv, ic1, ic2, velg, ci, pwq, dg, sublvl, mixa, mixb;
             uint32_t gate = V->gate;
+            const volatile uint8_t *pp = V->part ? PB : P;                  /* this voice's patch */
+            uint32_t dest_v = V->part ? destB : dest, mono_v = V->part ? mono_modeB : mono_mode;
+            int32_t lfo_v = V->part ? lfoB : lfo, *bus = V->part ? monb : mono;
 
             if (V->trig != V->seen) {           /* a new note */
                 V->seen = V->trig;
@@ -135,30 +160,30 @@ static void app_audio(int32_t *out, uint32_t n)
                 if (st == ST_OFF) { V->pa = V->pb = V->ps = 0; V->ic1 = V->ic2 = 0; }
                 st = ST_ATK;
                 V->fenv = ONE;
-                if (!mono_mode || P[P_GLIDE] == 0u) V->inc = V->inc_t;
+                if (!mono_v || pp[P_GLIDE] == 0u) V->inc = V->inc_t;
             }
             if (st == ST_OFF) continue;
             if (!gate && (st == ST_ATK || st == ST_DEC)) st = ST_REL;
 
             /* control rate: glide, envelopes */
             inc = V->inc;
-            if (mono_mode && P[P_GLIDE])
-                inc = (uint32_t)((int32_t)inc + (int32_t)(((int64_t)((int32_t)(V->inc_t - inc)) * GLIDE_R[P[P_GLIDE]]) >> 16));
+            if (mono_v && pp[P_GLIDE])
+                inc = (uint32_t)((int32_t)inc + (int32_t)(((int64_t)((int32_t)(V->inc_t - inc)) * GLIDE_R[pp[P_GLIDE]]) >> 16));
             else
                 inc = V->inc_t;
             V->inc = inc;
 
             env = V->env;
             {
-                int32_t pe = env, sus = (int32_t)P[P_SUS] * 66052;
+                int32_t pe = env, sus = (int32_t)pp[P_SUS] * 66052;
                 if (st == ST_ATK) {
-                    env += (int32_t)(((int64_t)(ONE + ONE / 3 - env) * RATE16[P[P_ATK]]) >> 24);
+                    env += (int32_t)(((int64_t)(ONE + ONE / 3 - env) * RATE16[pp[P_ATK]]) >> 24);
                     if (env >= ONE) { env = ONE; st = ST_DEC; }
                 } else if (st == ST_DEC) {
-                    env += (int32_t)(((int64_t)(sus - env) * RATE16[P[P_DEC]]) >> 24);
+                    env += (int32_t)(((int64_t)(sus - env) * RATE16[pp[P_DEC]]) >> 24);
                     if (sus < (1 << 12) && env < (1 << 12)) st = ST_OFF;
                 } else {
-                    int32_t d = (int32_t)(((int64_t)env * RATE16[P[P_REL]]) >> 24);
+                    int32_t d = (int32_t)(((int64_t)env * RATE16[pp[P_REL]]) >> 24);
                     env -= d < 1 ? 1 : d;
                     if (env < (1 << 12)) { env = 0; st = ST_OFF; }
                 }
@@ -168,33 +193,34 @@ static void app_audio(int32_t *out, uint32_t n)
             V->env = env;
             V->stage = (uint8_t)st;
             fenv = V->fenv;
-            fenv -= (int32_t)(((int64_t)fenv * RATE16[P[P_DEC]]) >> 24);
+            fenv -= (int32_t)(((int64_t)fenv * RATE16[pp[P_DEC]]) >> 24);
             V->fenv = fenv;
 
             /* oscillator steps with the LFO */
-            if (dest == 1u) inc += (int32_t)(((int64_t)inc * lfo) >> 18);
-            incb = inc + (uint32_t)(((uint64_t)inc * P[P_DET] * 26u) >> 16);
-            pwq = ((int32_t)P[P_PW] - 64) * 3;
-            if (dest == 2u) pwq += lfo >> 8;
+            if (dest_v == 1u) inc += (int32_t)(((int64_t)inc * lfo_v) >> 18);
+            inc += (uint32_t)(((int64_t)(int32_t)inc * bend) >> 16);          /* the pitch wheel: 8192 / 65536 = +12.5 % at the top */
+            incb = inc + (uint32_t)(((uint64_t)inc * pp[P_DET] * 26u) >> 16);
+            pwq = ((int32_t)pp[P_PW] - 64) * 3;
+            if (dest_v == 2u) pwq += lfo_v >> 8;
             pwq = pwq > 240 ? 240 : pwq < -240 ? -240 : pwq;
             wph = 0x80000000u + (uint32_t)(pwq * (1 << 23));
-            mixb = P[P_MIX]; mixa = 127 - mixb;
-            sublvl = P[P_SUB];
+            mixb = pp[P_MIX]; mixa = 127 - mixb;
+            sublvl = pp[P_SUB];
 
             /* filter coefficients (Simper SVF) */
-            ci = (int32_t)P[P_CUT] * 2 + (int32_t)(((int64_t)(fenv >> 8) * ((int32_t)P[P_ENVAMT] - 64)) >> 14) + ((int32_t)V->note - 60);
-            if (dest == 0u) ci += (lfo * 96) >> 15;
+            ci = (int32_t)pp[P_CUT] * 2 + (int32_t)(((int64_t)(fenv >> 8) * ((int32_t)pp[P_ENVAMT] - 64)) >> 14) + ((int32_t)V->note - 60);
+            if (dest_v == 0u) ci += (lfo_v * 96) >> 15;
             ci = ci < 0 ? 0 : ci > 255 ? 255 : ci;
             g = CUT_G[ci];
-            k = 131072u - (uint32_t)P[P_RES] * 980u;
+            k = 131072u - (uint32_t)pp[P_RES] * 980u;
             gk = (uint32_t)(((uint64_t)g * (g + k)) >> 16);
             den = 65536u + gk;
             a1 = 0xFFFFFFFFu / den;
             if (a1 > 65535u) a1 = 65535u;
             a2 = (uint32_t)(((uint64_t)g * a1) >> 16);
             a3 = (uint32_t)(((uint64_t)g * a2) >> 16);
-            dg = 256 + (int32_t)P[P_DRV] * 16;
-            velg = 32767 - ((127 - (int32_t)V->vel) * (int32_t)P[P_VELO] * 2);
+            dg = 256 + (int32_t)pp[P_DRV] * 16;
+            velg = 32767 - ((127 - (int32_t)V->vel) * (int32_t)pp[P_VELO] * 2);
 
             pa = V->pa; pb = V->pb; ps = V->ps; ic1 = V->ic1; ic2 = V->ic2;
             for (i = 0; i < 16u; i++) {
@@ -216,12 +242,13 @@ static void app_audio(int32_t *out, uint32_t n)
                 y = sclip((v2 * dg) >> 8);
                 ei += de;
                 amp = ((ei >> 8) * velg) >> 15;
-                mono[i] += (y * amp) >> 15;
+                bus[i] += (y * amp) >> 15;
             }
             V->pa = pa; V->pb = pb; V->ps = ps; V->ic1 = ic1; V->ic2 = ic2;
         }
 
-        /* bit crusher, ping-pong delay, out */
+        /* bit crusher, ping-pong delay, out. One part: as always. Two parts: each is crushed by its own patch; one delay line
+         * (time and feedback of the keys' patch) takes a send of each part (its DLY MIX) and returns at full level. */
         dtt = 1500 + (int32_t)P[P_DTIME] * 245;
         {
             int32_t d = dtt - dt_cur;
@@ -233,38 +260,51 @@ static void app_audio(int32_t *out, uint32_t n)
             int32_t target = pk > 26000 ? (int32_t)(26000u * 32768u / (uint32_t)pk) : 32768;
             lgain = target < lgain ? target : lgain + ((target - lgain) >> 4);
         }
-        for (i = 0; i < 16u; i++) {
-            int32_t dry, yL, yR, fL, fR, L, R, wd;
-            uint32_t rd;
-            m = mono[i] >> 1;
-            if (P[P_CRUSH]) {
-                uint32_t bits = 16u - ((uint32_t)P[P_CRUSH] * 12u >> 7), hold = 1u + ((uint32_t)P[P_CRUSH] * 10u >> 7);
-                if (++crush_n >= hold) { crush_n = 0; held = m & ~((1 << (16u - bits)) - 1); }
-                m = held;
+        {
+            int32_t send_a = lay ? (int32_t)P[P_DMIX] : 128, send_b = lay ? (int32_t)PB[P_DMIX] : 0, ret = lay ? 128 : (int32_t)P[P_DMIX];
+            for (i = 0; i < 16u; i++) {
+                int32_t dry, dryb, yL, yR, fL, fR, L, R, wd;
+                uint32_t rd;
+                m = mono[i] >> 1;
+                if (P[P_CRUSH]) {
+                    uint32_t bits = 16u - ((uint32_t)P[P_CRUSH] * 12u >> 7), hold = 1u + ((uint32_t)P[P_CRUSH] * 10u >> 7);
+                    if (++crush_n >= hold) { crush_n = 0; held = m & ~((1 << (16u - bits)) - 1); }
+                    m = held;
+                }
+                dry = m;
+                dryb = 0;
+                if (lay) {                      /* the layer's bus */
+                    mB = monb[i] >> 1;
+                    if (PB[P_CRUSH]) {
+                        uint32_t bits = 16u - ((uint32_t)PB[P_CRUSH] * 12u >> 7), hold = 1u + ((uint32_t)PB[P_CRUSH] * 10u >> 7);
+                        if (++crush_nB >= hold) { crush_nB = 0; heldB = mB & ~((1 << (16u - bits)) - 1); }
+                        mB = heldB;
+                    }
+                    dryb = mB;
+                }
+                rd = (dw - (uint32_t)dt_cur) & (DLEN - 1u);
+                yL = dlL[rd]; yR = dlR[rd];
+                lpL += (yL - lpL) >> 2; lpR += (yR - lpR) >> 2;
+                fL = (lpL * (int32_t)((P[P_DFB] * 113u) >> 7)) >> 7;
+                fR = (lpR * (int32_t)((P[P_DFB] * 113u) >> 7)) >> 7;
+                wd = ((dry * send_a + dryb * send_b) >> 7) + fR;   /* ping-pong: input and the right repeat feed the left, left feeds right */
+                dlL[dw] = (int16_t)(wd > 32767 ? 32767 : wd < -32767 ? -32767 : wd);
+                dlR[dw] = (int16_t)(fL > 32767 ? 32767 : fL < -32767 ? -32767 : fL);
+                dw = (dw + 1u) & (DLEN - 1u);
+                L = dry + dryb + ((yL * ret) >> 7);
+                R = dry + dryb + ((yR * ret) >> 7);
+                {                               /* limiter: peak follower in, gain per tick below; the soft clip catches the rest */
+                    int32_t pkn = (L < 0 ? -L : L) > (R < 0 ? -R : R) ? (L < 0 ? -L : L) : (R < 0 ? -R : R);
+                    pk = pkn > pk ? pkn : pk - (pk >> 11);
+                }
+                L = L > 65535 ? 65535 : L < -65535 ? -65535 : L;   /* (so that L * lgain fits in 32 bits; the limiter is a tick late) */
+                R = R > 65535 ? 65535 : R < -65535 ? -65535 : R;
+                L = sclip((L * lgain) >> 15);
+                R = sclip((R * lgain) >> 15);
+                out[2u * (b + i)] += L;
+                out[2u * (b + i) + 1u] += R;
+                scope[scope_w++ & (SCOPE_N - 1u)] = (int16_t)((L + R) >> 1);
             }
-            dry = m;
-            rd = (dw - (uint32_t)dt_cur) & (DLEN - 1u);
-            yL = dlL[rd]; yR = dlR[rd];
-            lpL += (yL - lpL) >> 2; lpR += (yR - lpR) >> 2;
-            fL = (lpL * (int32_t)((P[P_DFB] * 113u) >> 7)) >> 7;
-            fR = (lpR * (int32_t)((P[P_DFB] * 113u) >> 7)) >> 7;
-            wd = dry + fR;                      /* ping-pong: input and the right repeat feed the left, left feeds right */
-            dlL[dw] = (int16_t)(wd > 32767 ? 32767 : wd < -32767 ? -32767 : wd);
-            dlR[dw] = (int16_t)(fL > 32767 ? 32767 : fL < -32767 ? -32767 : fL);
-            dw = (dw + 1u) & (DLEN - 1u);
-            L = dry + ((yL * (int32_t)P[P_DMIX]) >> 7);
-            R = dry + ((yR * (int32_t)P[P_DMIX]) >> 7);
-            {                                   /* limiter: peak follower in, gain per tick below; the soft clip catches the rest */
-                int32_t pkn = (L < 0 ? -L : L) > (R < 0 ? -R : R) ? (L < 0 ? -L : L) : (R < 0 ? -R : R);
-                pk = pkn > pk ? pkn : pk - (pk >> 11);
-            }
-            L = L > 65535 ? 65535 : L < -65535 ? -65535 : L;   /* (so that L * lgain fits in 32 bits; the limiter is a tick late) */
-            R = R > 65535 ? 65535 : R < -65535 ? -65535 : R;
-            L = sclip((L * lgain) >> 15);
-            R = sclip((R * lgain) >> 15);
-            out[2u * (b + i)] += L;
-            out[2u * (b + i) + 1u] += R;
-            scope[scope_w++ & (SCOPE_N - 1u)] = (int16_t)((L + R) >> 1);
         }
         vis_pk = (uint32_t)pk;
     }
@@ -282,66 +322,112 @@ static const uint32_t INC_C9[12] = {            /* MIDI 120..131; lower octaves 
     815363807u, 863847862u, 915214929u, 969636441u, 1027294024u, 1088380105u,
     1153098554u, 1221665363u, 1294309365u, 1371273005u, 1452813141u, 1539201906u};
 static uint32_t ages;
-static uint8_t stk[8], nstk;
+static uint8_t stk2[2][8], nstk2[2];            /* mono: the held notes of each part */
 
 enum { SRC_KEY, SRC_ARP, SRC_SEQ };             /* who started a voice: a note off only ends its own */
 static uint8_t vsrc[NV];
 
-static uint32_t note_inc(uint32_t note)
+static uint32_t note_inc(uint32_t note, uint32_t part)
 {
     uint32_t inc = INC_C9[note % 12u] >> (10u - note / 12u);
-    int32_t tune = (int32_t)P[P_TUNE] - 64;
+    int32_t tune = (int32_t)(part ? PB[P_TUNE] : P[P_TUNE]) - 64;
     return inc + (uint32_t)(int32_t)(((int64_t)inc * (tune * 28)) >> 16);
 }
-static int is_mono(void) { return P[P_MODE] >= 64u; }
+static uint32_t part_of(uint32_t src) { return lay_now && src != SRC_KEY ? 1u : 0u; }   /* two parts: the arp and the sequencer are the layer */
+static int is_mono_p(uint32_t part) { return (part ? PB[P_MODE] : P[P_MODE]) >= 64u; }
+static int is_mono(void) { return is_mono_p(0); }
+
+/* MIDI out over USB: what the arpeggiator and the sequencer play (the keys you press are sent from the main loop).
+ * The audio ISR is the only writer of this ring and the main loop the only reader and the only caller of midi_send. */
+#define MOQ 64u
+static volatile uint32_t moq[MOQ], moq_w, moq_r;
+static void mout_push(uint32_t st, uint32_t d1, uint32_t d2)
+{
+    uint32_t w = moq_w;
+    if (w - moq_r >= MOQ) return;
+    moq[w & (MOQ - 1u)] = st | (d1 & 127u) << 8 | (d2 & 127u) << 16;
+    moq_w = w + 1u;
+}
 
 static void voice_on(uint32_t note, uint32_t vel, uint32_t src)
 {
-    uint32_t v, pick = 0, best = 0xFFFFFFFFu, i, j;
+    uint32_t v, pick = 0, best = 0xFFFFFFFFu, i, j, part = part_of(src);
+    uint8_t *stk = stk2[part], *nstk = &nstk2[part];
     if (note > 127u || !vel) return;
+    if (src != SRC_KEY) mout_push(lay_now ? 0x91u : 0x90u, note, vel);      /* (two parts: the layer is on channel 2) */
 #ifdef DINGHY_HOST
     printf("%6u ms  voice on  %3u vel %3u\n", fm1_ms, note, vel);   /* (host only: the trace the tests read) */
 #endif
-    if (is_mono()) {
-        for (i = j = 0; i < nstk; i++) if (stk[i] != note) stk[j++] = stk[i];
-        nstk = (uint8_t)j;
-        if (nstk < 8u) stk[nstk++] = (uint8_t)note;
-        voice[0].note = (uint8_t)note;
-        voice[0].vel = (uint8_t)vel;
-        voice[0].inc_t = note_inc(note);
-        if (!voice[0].gate) voice[0].trig++;    /* legato: no retrigger while a key is held */
-        voice[0].gate = 1;
+    if (is_mono_p(part)) {                      /* a mono part plays on one voice of its own: 0 for the keys, 3 for the layer */
+        uint32_t mv = part ? 3u : 0u;
+        for (i = j = 0; i < *nstk; i++) if (stk[i] != note) stk[j++] = stk[i];
+        *nstk = (uint8_t)j;
+        if (*nstk < 8u) stk[(*nstk)++] = (uint8_t)note;
+        voice[mv].part = (uint8_t)part;
+        voice[mv].note = (uint8_t)note;
+        voice[mv].vel = (uint8_t)vel;
+        voice[mv].inc_t = note_inc(note, part);
+        if (!voice[mv].gate) voice[mv].trig++;  /* legato: no retrigger while a key is held */
+        voice[mv].gate = 1;
+#ifdef DINGHY_HOST
+        if (lay_now) printf("%6u ms  part %c  note %3u  voice %u\n", fm1_ms, part ? 'B' : 'A', note, mv);
+#endif
         return;
     }
     for (v = 0; v < NV; v++) {                  /* same note and source, else a free voice, else a releasing one, else the oldest */
-        uint32_t score = voice[v].note == note && voice[v].gate && vsrc[v] == src ? 0u
-                       : voice[v].stage == ST_OFF ? 1u
-                       : !voice[v].gate ? 2u + ((uint32_t)voice[v].env >> 12)
-                       : 0x80000000u + voice[v].age;
+        uint32_t free_ = voice[v].stage == ST_OFF && !voice[v].gate;   /* (a voice claimed a moment ago by another note of the same chord still reads ST_OFF until the audio runs) */
+        uint32_t score;
+        if (lay_now) {                          /* two parts: voice 0 is the keys', voice 3 the layer's; 1 and 2 are shared; a held note of the other part is never taken */
+            if ((part == 0u && v == 3u) || (part == 1u && v == 0u)) continue;
+            if (voice[v].part != part && voice[v].gate) continue;
+        }
+        score = voice[v].note == note && voice[v].gate && vsrc[v] == src ? 0u
+              : free_ ? 1u
+              : !voice[v].gate ? 2u + ((uint32_t)voice[v].env >> 12)
+              : 0x80000000u + voice[v].age;
         if (score < best) { best = score; pick = v; }
     }
+    if (best == 0xFFFFFFFFu) pick = part ? 3u : 0u;     /* nothing allowed was free: the part's own reserved voice */
     vsrc[pick] = (uint8_t)src;
+    voice[pick].part = (uint8_t)part;
     voice[pick].note = (uint8_t)note;
     voice[pick].vel = (uint8_t)vel;
     voice[pick].age = ++ages;
-    voice[pick].inc_t = note_inc(note);
+    voice[pick].inc_t = note_inc(note, part);
     voice[pick].gate = 1;
     voice[pick].trig++;
+#ifdef DINGHY_HOST
+    if (lay_now) printf("%6u ms  part %c  note %3u  voice %u\n", fm1_ms, part ? 'B' : 'A', note, pick);
+#endif
 }
 static void voice_off(uint32_t note, uint32_t src)
 {
-    uint32_t v, i, j;
-    if (is_mono()) {
-        for (i = j = 0; i < nstk; i++) if (stk[i] != note) stk[j++] = stk[i];
-        nstk = (uint8_t)j;
-        if (nstk) {                             /* back to the previous held key, legato */
-            voice[0].note = stk[nstk - 1u];
-            voice[0].inc_t = note_inc(stk[nstk - 1u]);
+    uint32_t v, i, j, part = part_of(src);
+    uint8_t *stk = stk2[part], *nstk = &nstk2[part];
+    if (src != SRC_KEY) mout_push(lay_now ? 0x81u : 0x80u, note, 0);
+    if (src != SRC_KEY) {                       /* a note the layer's switching caught mid-way: it ends where it started */
+        uint32_t o = part ^ 1u;
+        for (i = 0; i < nstk2[o] && stk2[o][i] != note; i++) ;
+        if (i < nstk2[o]) {
+            uint32_t mv = o ? 3u : 0u;
+            for (i = j = 0; i < nstk2[o]; i++) if (stk2[o][i] != note) stk2[o][j++] = stk2[o][i];
+            nstk2[o] = (uint8_t)j;
+            if (j) { voice[mv].note = stk2[o][j - 1u]; voice[mv].inc_t = note_inc(voice[mv].note, o); }
+            else voice[mv].gate = 0;
+        }
+    }
+    if (is_mono_p(part)) {
+        uint32_t mv = part ? 3u : 0u;
+        for (i = j = 0; i < *nstk; i++) if (stk[i] != note) stk[j++] = stk[i];
+        *nstk = (uint8_t)j;
+        if (*nstk) {                            /* back to the previous held key, legato */
+            voice[mv].note = stk[*nstk - 1u];
+            voice[mv].inc_t = note_inc(stk[*nstk - 1u], part);
         } else {
 #ifdef DINGHY_HOST
-            if (voice[0].gate) printf("%6u ms  voice off %3u\n", fm1_ms, note);
+            if (voice[mv].gate) printf("%6u ms  voice off %3u\n", fm1_ms, note);
 #endif
-            voice[0].gate = 0;
+            voice[mv].gate = 0;
         }
         return;
     }
@@ -356,8 +442,14 @@ static void voice_off(uint32_t note, uint32_t src)
 static void voice_panic(void)
 {
     uint32_t v;
-    nstk = 0;
+    nstk2[0] = nstk2[1] = 0;
     for (v = 0; v < NV; v++) voice[v].gate = 0;
+}
+static void voice_panic_part(uint32_t part)     /* two parts: end the notes of one part only */
+{
+    uint32_t v;
+    nstk2[part] = 0;
+    for (v = 0; v < NV; v++) if (voice[v].part == part) voice[v].gate = 0;
 }
 static int quiet(void)
 {
@@ -459,6 +551,7 @@ static void engine_tick(void)                   /* every 16 frames */
     uint32_t step_len, arp_len, gl, bpm, swd, ac, wp, ra, i;
     static const uint8_t ARPK[5] = {192, 96, 48, 32, 24};       /* 1/4, 1/8, 1/16, 1/16 triplet, 1/32 in 48ths of a step */
 
+    lay_now = layer;                            /* two parts: latched here, so a tick sees one state */
     bpm = 60u + P[P_BPM];
     step_len = 661500u / bpm;                   /* samples per 16th note: 44100 * 60 / 4 / bpm */
     swd = (step_len * P[P_SWING]) >> 8;         /* the odd steps come late, up to half a step (swing 50..75 %) */
@@ -473,12 +566,23 @@ static void engine_tick(void)                   /* every 16 frames */
         evq_r++;
         if (type == EV_ON) user_on(note, vel);
         else if (type == EV_OFF) user_off(note);
-        else if (type == EV_PANIC) {
-            voice_panic();
-            pmask[0] = pmask[1] = pmask[2] = pmask[3] = 0;
-            lmask[0] = lmask[1] = lmask[2] = lmask[3] = 0;
-            arp_cur = seq_cur = 0;
-            arp_dirty = 1;
+        else if (type == EV_PANIC) {            /* note: 0 everything, 1 the keys' part only, 2 the layer only */
+            if (note == 0u) {
+                mout_push(0xB0u, 123, 0);       /* all notes off, to whatever listens on the USB out */
+                if (lay_now) mout_push(0xB1u, 123, 0);
+                voice_panic();
+                pmask[0] = pmask[1] = pmask[2] = pmask[3] = 0;
+                lmask[0] = lmask[1] = lmask[2] = lmask[3] = 0;
+                arp_cur = seq_cur = 0;
+                arp_dirty = 1;
+            } else if (note == 1u) {
+                mout_push(0xB0u, 123, 0);
+                voice_panic_part(0);
+            } else {
+                mout_push(0xB1u, 123, 0);
+                voice_panic_part(1);
+                arp_cur = seq_cur = 0;
+            }
         } else if (type == EV_REST && rec_arm && !playing) {
             if (rec_fresh) { for (i = 0; i < 32u; i++) pat[i] = 0; rec_fresh = 0; }
             if (rec_cursor < 32u) pat[rec_cursor++] = 0;
@@ -556,8 +660,11 @@ static uint32_t edited;                         /* edited since loaded */
 static void load_preset(uint32_t n)
 {
     uint32_t i;
-    push_ev(EV_PANIC, 0, 0);
+    push_ev(EV_PANIC, layer ? 1u : 0u, 0);     /* (two parts: the layer's notes go on) */
     cur = n;
+#ifdef DINGHY_HOST
+    printf("%6u ms  preset index %u\n", fm1_ms, n);
+#endif
     for (i = 0; i < NPP; i++) P[i] = set.slot[n][i];
     edited = 0;
 }
@@ -565,6 +672,48 @@ static void set_param(uint32_t idx, int32_t val)
 {
     val = val < 0 ? 0 : val > 127 ? 127 : val;
     if (P[idx] != val) { P[idx] = (uint8_t)val; if (idx < NPP) edited = 1; }   /* (the global ones are not part of a preset) */
+}
+
+/* ---- two-part mode: the keys play patch A (P), the sequencer and the arpeggiator play patch B (PB) */
+static uint32_t curB, editedB;
+static struct { uint8_t layer, curB, editedB, pad; uint8_t pb[NPP]; } lrec;      /* what SAVE keeps (the project sector) */
+static void layer_set(uint32_t on)
+{
+    uint32_t k, f;
+#ifdef DINGHY_HOST
+    printf("%6u ms  layer %s\n", fm1_ms, on ? "on" : "off");
+#endif
+    if (on && !layer) {                         /* send the sound you hold to the layer; the keys keep it until you change it */
+        f = irq_save();
+        for (k = 0; k < NPP; k++) PB[k] = P[k];
+        curB = cur; editedB = edited;
+        layer = 1;
+        irq_restore(f);
+    } else if (!on && layer) {
+        layer = 0;
+        push_ev(EV_PANIC, 2, 0);                /* the layer's notes end; the keys go on */
+    }
+}
+static void layer_swap(void)                    /* the keys and the layer exchange patches: edit the layer through the keys */
+{
+    uint32_t k, f, t;
+    if (!layer) return;
+#ifdef DINGHY_HOST
+    printf("%6u ms  layer swap\n", fm1_ms);
+#endif
+    push_ev(EV_PANIC, 1, 0);
+    push_ev(EV_PANIC, 2, 0);
+    f = irq_save();
+    for (k = 0; k < NPP; k++) { uint8_t x = P[k]; P[k] = PB[k]; PB[k] = x; }
+    irq_restore(f);
+    t = cur; cur = curB; curB = t;
+    t = edited; edited = editedB; editedB = t;
+}
+static void lrec_fill(void)
+{
+    uint32_t k;
+    lrec.layer = layer; lrec.curB = (uint8_t)curB; lrec.editedB = (uint8_t)editedB; lrec.pad = 0;
+    for (k = 0; k < NPP; k++) lrec.pb[k] = PB[k];
 }
 
 /* ---- the screen: a neon HUD, the live scope, four knobs per page */
@@ -609,16 +758,23 @@ static void fmt_val(uint32_t idx, char *s)
 
 static void draw_title(void)
 {
-    char s[24];
+    char s[32];
     uint32_t n = 0;
     const char *p = PNAME[cur];
     cv_begin(240, 56, BG);
     cv_text(10, 0, &FONT_L, "CYBERDECK", C_MG);      /* chromatic aberration: magenta, cyan, then white on top */
     cv_text(6, 0, &FONT_L, "CYBERDECK", C_CY);
     cv_text(8, 0, &FONT_L, "CYBERDECK", C_WHITE);
+    if (layer) s[n++] = 'A';                    /* two parts: "A1 NEON RAIN B2 CHROME BASS" (the names are cut to fit) */
     s[n++] = (char)('1' + cur); s[n++] = ' ';
-    while (*p && n < 20u) s[n++] = *p++;
+    while (*p && n < (layer ? 11u : 20u)) s[n++] = *p++;
     if (edited) s[n++] = '*';
+    if (layer) {
+        const char *q = PNAME[curB];
+        s[n++] = ' '; s[n++] = 'B'; s[n++] = (char)('1' + curB); s[n++] = ' ';
+        while (*q && n < 23u) s[n++] = *q++;
+        if (editedB) s[n++] = '*';
+    }
     s[n] = 0;
     cv_rect(0, 36, 240, 1, C_PU);
     cv_text(8, 38, &FONT_S, s, C_YE);
@@ -775,6 +931,15 @@ static void init_stage(uint32_t n)
         for (k = 0; k < NP - NPP; k++) P[NPP + k] = set.g[k];
         for (k = 0; k < 32u; k++) pat[k] = set.pat[k];
         load_preset(set.cur);
+        if (project_load(&lrec, sizeof lrec) == 0 && lrec.layer == 1u && lrec.curB < NPRESET) {     /* two parts: the layer's patch */
+            uint8_t bad = 0;
+            for (k = 0; k < NPP; k++) bad |= lrec.pb[k];
+            if (!(bad & 0x80u)) {
+                for (k = 0; k < NPP; k++) PB[k] = lrec.pb[k];
+                curB = lrec.curB; editedB = lrec.editedB & 1u;
+                layer = 1;
+            }
+        }
     }
 }
 
@@ -809,12 +974,19 @@ static void boot_splash(void)                   /* the logo over a neon sunset, 
     sc_fade = 256u; sc_gl = 0; sc_roll = 0; sc_strip_i = 0;
 }
 
+static void arp_press(uint32_t *page, uint32_t *redraw)     /* the ARP button's tap */
+{
+    if (*page != 6u) { *page = 6; *redraw = 1; if (!arp_cmd) arp_cmd = 1; }
+    else arp_cmd = (uint8_t)(arp_cmd == 0u ? 1u : arp_cmd == 1u ? 2u : 0u);
+}
+
 static void app_main(void)
 {
     static const uint8_t PAGE_BTN[6] = {BTN_EDIT, BTN_SEL, BTN_ENV, BTN_LFO, BTN_FX, BTN_GLO};
     uint32_t prev = 0, k, t_scope = 0, t_stat = 0, t_change = 0, redraw = 1, page = 0, sel = 0, sel_drawn = 0;
     uint32_t pending_save = 0, was_mono, lit_drawn = ~0u, edited_drawn = 0, sig_drawn = ~0u, home_t = 0, home_long = 0, tap_t = 0;
     uint32_t show_vis, vis_drawn = 0, vpg = 99;
+    uint32_t arp_t = 0, arp_long = 0, arp_tap = 0, seq_t = 0, seq_long = 0, pending_proj = 0;     /* two parts: the long presses */
     uint8_t shown[NP];
     int32_t oct_drawn = 99;
     uint8_t held[27] = {0};
@@ -839,18 +1011,33 @@ static void app_main(void)
         up = prev & ~keys;
         prev = keys;
         for (k = 0; k < 27u; k++) {
-            if (down >> k & 1u) { held[k] = (uint8_t)(base + k); push_ev(EV_ON, held[k], 100); midi_send(0x90, held[k], 100); }
+            if (down >> k & 1u) { held[k] = (uint8_t)(base + k); push_ev(EV_ON, held[k], 100); if (!arp_cmd) midi_send(0x90, held[k], 100); }   /* (with the arp on, the arp's notes go out instead) */
             if (up >> k & 1u) { push_ev(EV_OFF, held[k], 0); midi_send(0x80, held[k], 0); }
         }
 
         b = fm1_input_edges(&rel);
         for (k = 0; k < 6u; k++)
             if (b & (1u << PAGE_BTN[k])) { page = k; redraw = 1; }
-        if (b & (1u << BTN_ARP)) {              /* ARP: off -> on (and its page) -> hold -> off */
-            if (page != 6u) { page = 6; redraw = 1; if (!arp_cmd) arp_cmd = 1; }
-            else arp_cmd = (uint8_t)(arp_cmd == 0u ? 1u : arp_cmd == 1u ? 2u : 0u);
+        /* ARP: off -> on (and its page) -> hold -> off. Two parts: held for 600 ms it swaps the keys' and the layer's patch, so the
+         * tap acts on the release (a tap reads "pressed and let go in time"); with the layer off there is nothing to swap and the
+         * press acts at once, as before. */
+        if (b & (1u << BTN_ARP)) { arp_t = fm1_ms; arp_long = 0; arp_tap = !layer; if (!layer) arp_press(&page, &redraw); }
+        if (arp_t && !arp_long && layer && (fm1_in.buttons >> BTN_ARP & 1u) && fm1_ms - arp_t > 600u) {
+            arp_long = 1;
+            layer_swap();
+            redraw = 1; msg = "SWAPPED"; t_msg = fm1_ms;
         }
-        if (b & (1u << BTN_SEQ)) { page = 7; redraw = 1; }
+        if (rel & (1u << BTN_ARP)) {
+            if (arp_t && !arp_long && !arp_tap) arp_press(&page, &redraw);
+            arp_t = 0;
+        }
+        if (b & (1u << BTN_SEQ)) { page = 7; redraw = 1; seq_t = fm1_ms; seq_long = 0; }
+        if (seq_t && !seq_long && (fm1_in.buttons >> BTN_SEQ & 1u) && fm1_ms - seq_t > 600u) {   /* held: the layer on or off */
+            seq_long = 1;
+            layer_set(!layer);
+            redraw = 1; msg = layer ? "LAYER ON" : "LAYER OFF"; t_msg = fm1_ms;
+        }
+        if (rel & (1u << BTN_SEQ)) seq_t = 0;
         if (b & (1u << BTN_PLAY)) want_play = (uint8_t)!want_play;
         if (b & (1u << BTN_REC)) {              /* arm: the next notes are recorded; disarm: a step recording sets the length */
             if (rec_arm) {
@@ -885,6 +1072,7 @@ static void app_main(void)
             for (k = 0; k < NP - NPP; k++) set.g[k] = P[NPP + k];
             for (k = 0; k < 32u; k++) set.pat[k] = pat[k];
             set.cur = (uint8_t)cur; set.pad = (uint8_t)show_vis; edited = 0; pending_save = 1; t_change = fm1_ms; redraw = 1;
+            if (layer || lrec.layer) { pending_proj = 1; editedB = 0; }     /* two parts: the layer's patch goes in its own sector */
             msg = "SAVED"; t_msg = fm1_ms;
         }
 
@@ -903,14 +1091,28 @@ static void app_main(void)
             redraw = 1;
             msg = PNAME[cur]; t_msg = fm1_ms;
         }
-        if ((uint32_t)is_mono() != was_mono) { was_mono = (uint32_t)is_mono(); push_ev(EV_PANIC, 0, 0); }
+        if ((uint32_t)is_mono() != was_mono) { was_mono = (uint32_t)is_mono(); push_ev(EV_PANIC, layer ? 1u : 0u, 0); }
 
-        while (midi_get(&st, &d1, &d2)) {
+        while (midi_get(&st, &d1, &d2)) {       /* USB-MIDI and the TRS jack come out of the same queue */
             if ((st & 0xF0u) == 0x90u && d2) push_ev(EV_ON, d1, d2);
             else if ((st & 0xF0u) == 0x80u || (st & 0xF0u) == 0x90u) push_ev(EV_OFF, d1, 0);
-            else if ((st & 0xF0u) == 0xB0u)
-                for (k = 0; k < 6u; k++)
+            else if ((st & 0xF0u) == 0xB0u) {
+                if (d1 == 120u || d1 == 123u) push_ev(EV_PANIC, 0, 0);          /* all sound off / all notes off */
+                else for (k = 0; k < 6u; k++)
                     if (CC_MAP[k][0] == d1) set_param(CC_MAP[k][1], d2);
+            } else if ((st & 0xF0u) == 0xC0u) {                                 /* program change: the patch */
+                load_preset(d1 % NPRESET); redraw = 1; msg = PNAME[cur]; t_msg = fm1_ms;
+            } else if ((st & 0xF0u) == 0xE0u) {                                 /* the pitch wheel */
+                bend = ((int32_t)d1 | (int32_t)d2 << 7) - 8192;
+#ifdef DINGHY_HOST
+                printf("%6u ms  pitch bend %d\n", fm1_ms, (int)bend);
+#endif
+            }
+        }
+        while (moq_r != moq_w) {                /* what the arp and the sequencer played, out over USB */
+            uint32_t m = moq[moq_r & (MOQ - 1u)];
+            moq_r++;
+            midi_send(m & 0xFFu, m >> 8 & 0x7Fu, m >> 16 & 0x7Fu);
         }
 
         base = (uint32_t)(KEY0 + 12 * set.oct);
@@ -946,7 +1148,8 @@ static void app_main(void)
                 vis_drawn = 0; lcd_fill(0, 0, 240, 240, BG); redraw = 1; oct_drawn = 99; t_stat = fm1_ms - 1000u; vpg = 99;
             }
             /* the screen: only what changed */
-            sig = arp_cmd | (playing ? 4u : 0u) | (rec_arm ? 8u : 0u) | (edited ? 16u : 0u) | (uint32_t)P[P_BPM] << 8;
+            sig = arp_cmd | (playing ? 4u : 0u) | (rec_arm ? 8u : 0u) | (edited ? 16u : 0u) | (layer ? 32u : 0u) | (layer && editedB ? 64u : 0u) | (uint32_t)P[P_BPM] << 8
+                | (layer ? curB << 16 : 0u);
             if (redraw) { draw_title(); draw_tabs(page); for (k = 0; k < NP; k++) shown[k] = 255; redraw = 0; oct_drawn = 99; sig_drawn = sig; edited_drawn = edited; }
             for (r = 0; r < 4u; r++)
                 if (shown[page * 4u + r] != P[page * 4u + r]) {
@@ -968,6 +1171,7 @@ static void app_main(void)
         if (pending_save && quiet() && !playing && fm1_ms - t_change > 1000u) {   /* an erase stalls the sound: only when silent */
             settings_save(&set, sizeof set);
             pending_save = 0;
+            if (pending_proj) { lrec_fill(); project_save(&lrec, sizeof lrec); pending_proj = 0; }
         }
     }
 }

@@ -59,8 +59,28 @@ static void lcd_blit(uint32_t x, uint32_t y, uint32_t w, uint32_t h, const uint1
 #include "gfx.c"
 
 static uint8_t host_store[256 + 4];
+static uint8_t host_proj[4000];
+static int host_proj_ok;
+/* FM1_HOST_STORE=path: the settings and the project sector live in that file between runs (a power cycle in a test) */
+static void host_persist(int save)
+{
+    const char *path = getenv("FM1_HOST_STORE");
+    static int loaded;
+    FILE *f;
+    if (!path) return;
+    if (!save && !loaded && (f = fopen(path, "rb"))) {
+        loaded = 1;
+        if (fread(host_store, 1, sizeof host_store, f) == sizeof host_store && fread(host_proj, 1, sizeof host_proj, f) == sizeof host_proj) host_proj_ok = host_proj[3999];
+        fclose(f);
+    } else if (save && (f = fopen(path, "wb"))) {
+        host_proj[3999] = (uint8_t)host_proj_ok;
+        fwrite(host_store, 1, sizeof host_store, f); fwrite(host_proj, 1, sizeof host_proj, f);
+        fclose(f);
+    }
+}
 static int settings_load(void *p, uint32_t n)
 {
+    host_persist(0);
     if (host_store[0] != 1 || n > 256u) return -1;
     memcpy(p, host_store + 4, n);
     return 0;
@@ -70,8 +90,14 @@ static int settings_save(const void *p, uint32_t n)
     host_store[0] = 1;
     memcpy(host_store + 4, p, n);
     printf("%6u ms  settings saved (%u B)\n", fm1_ms, n);
+    host_persist(1);
     return 0;
 }
+
+static int project_load(void *p, uint32_t n) { host_persist(0); if (!host_proj_ok || n > 3990u) return -1; memcpy(p, host_proj, n); return 0; }
+static int project_save(const void *p, uint32_t n) { memcpy(host_proj, p, n); host_proj_ok = 1; printf("%6u ms  project saved (%u B)\n", fm1_ms, n); host_persist(1); return 0; }
+static inline uint32_t irq_save(void) { return 0; }          /* (one thread on a computer: nothing to hold off) */
+static inline void irq_restore(uint32_t f) { (void)f; }
 
 static uint8_t mq[64][3];
 static uint32_t mq_w, mq_r;
@@ -84,11 +110,21 @@ static int midi_get(uint8_t *st, uint8_t *d1, uint8_t *d2)
 }
 static void midi_send(uint32_t st, uint32_t d1, uint32_t d2) { printf("%6u ms  MIDI out %02X %u %u\n", fm1_ms, st, d1, d2); }
 
+/* the TRS jack: the parser of firmware/src/midi_uart.c, fed with bytes by "T uart B0 B1 ..." (it queues into the same ring) */
+static int um_put(uint32_t pkt)
+{
+    if (mq_w - mq_r >= 64u) return 0;
+    mq[mq_w % 64u][0] = (uint8_t)(pkt >> 8); mq[mq_w % 64u][1] = (uint8_t)(pkt >> 16); mq[mq_w % 64u][2] = (uint8_t)(pkt >> 24);
+    mq_w++;
+    return 1;
+}
+#include "../firmware/src/midi_uart.c"
+
 static void app_audio(int32_t *out, uint32_t n);
 static void app_main(void);
 
 /* the script: at t ms, keys down (bit k = key k, 0 = F3), a button edge, a MIDI message. A script file (the second
- * argument) replaces it, a line each: "T keys MASK" (hex or decimal), "T btn ID [MS]", "T enc ID N", "T shot", "T splash", "T midi ST D1 D2", "T end" */
+ * argument) replaces it, a line each: "T keys MASK" (hex or decimal), "T btn ID [MS]", "T enc ID N", "T shot", "T splash", "T midi ST D1 D2", "T uart B0 B1 ...", "T end" */
 typedef struct { uint32_t t, keys; int btn; uint8_t st, d1, d2; } host_ev_t;
 static const host_ev_t SCRIPT0[] = {
     {200, 1u << 7, -1, 0, 0, 0},                                /* C4 */
@@ -123,6 +159,17 @@ static void read_script(const char *path)
         if (!strcmp(what, "keys")) { sscanf(line, "%*u %*s %i", (int *)&e.keys); }
         else if (!strcmp(what, "enc")) { int id = 0, dn = 0; sscanf(line, "%*u %*s %d %d", &id, &dn); e.btn = 100 + id; e.keys = (uint32_t)dn; }
         else if (!strcmp(what, "btn")) { int dur = 0; sscanf(line, "%*u %*s %d %d", &e.btn, &dur); e.keys = (uint32_t)dur; }
+        else if (!strcmp(what, "uart")) {         /* raw bytes (hex) on the TRS jack: one event per byte */
+            char *q = strstr(line, "uart") + 4;
+            for (;;) {
+                char *end;
+                long v = strtol(q, &end, 16);
+                if (end == q) break;
+                q = end;
+                if (n < 4096u) { host_ev_t u = e; u.btn = 300; u.keys = (uint32_t)(v & 0xFF); ev[n++] = u; }
+            }
+            continue;
+        }
         else if (!strcmp(what, "midi")) { sscanf(line, "%*u %*s %i %u %u", (int *)&a, &b, &c); e.st = (uint8_t)a; e.d1 = (uint8_t)b; e.d2 = (uint8_t)c; }
         else continue;
         ev[n++] = e;
@@ -184,7 +231,9 @@ static void platform_poll(void)                 /* one call = one millisecond */
         if (script[step].st) {
             mq[mq_w % 64u][0] = script[step].st; mq[mq_w % 64u][1] = script[step].d1; mq[mq_w % 64u][2] = script[step].d2;
             mq_w++;
-        } else if (script[step].btn >= 100)
+        } else if (script[step].btn >= 300)
+            um_byte(script[step].keys);
+        else if (script[step].btn >= 100)
             host_enc[(script[step].btn - 100) & 7] += (int32_t)script[step].keys;
         else if (script[step].btn >= 0)
         {                                       /* a press now (fm1_in.buttons), its release after keys ms (default 80) */

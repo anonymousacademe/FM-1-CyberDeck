@@ -1,0 +1,6 @@
+# TWO-PART MODE, saved (run with FM1_HOST_STORE=file, then tests/layer_save_b.txt with the same file: a power cycle)
+100 enc 6 1
+200 btn 11 800
+1200 enc 6 -1
+1400 btn 9
+3500 end

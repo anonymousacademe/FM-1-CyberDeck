@@ -779,7 +779,7 @@ for cand in sys.argv[1:] or ["FM-1_960"]:
 | **CYBERDECK** | Four-voice subtractive synth, arpeggiator, 32-step sequencer, mutate; v1.0 plus fixes, flashed and identified on a unit | Engine in the audio ISR, event queue from the main loop, host tests with scripts; a **neon scene for every page** built from EffectCraft plates plus live overlays (the filter curve, the envelope, the echoes, a radar, the arp ring, the pattern as a skyline) and a loading screen; a preset research note | `FM-1_960` (free) |
 | **TRIPDECK** | CYBERDECK-based synth with five psychedelic scenes and sound effects | Scenes on every page, shared knobs; a 120x120 field drawn 2x2 in strips | `FM-1_908` (free) |
 | **MLdeck** | Per-parameter motion plus **on-device learned decoders** (timbre, saturation curve, resonator bank) trained on the PC | Tiny integer networks at control rate; the DSP does the audio | `FM-1_920` (**collides with ChoralRoot**) |
-| **GroveDeck** | Drum machine (16 synthesized drums, 16-step sequencer, patterns, kits) | Adds a second 4 KB flash sector for project data | `FM-1_950` (**collides with CS-1**) |
+| **GrooveDeck** | Drum machine (16 synthesized drums, 16-step sequencer, patterns, kits) | Adds a second 4 KB flash sector for project data | `FM-1_950` (**collides with CS-1**) |
 | **DoppleDecker** | An FM synth plus a PC tool that fits an FM patch to an audio snippet, using the same integer engine as the firmware | Parity between the PC library and the device; a bank format (`.ddb`) that the firmware cannot load yet | `FM-1_940` (**collides with sloopDX**) |
 
 **Corrections this guide suggests for our own documents (not applied; the human decides):**

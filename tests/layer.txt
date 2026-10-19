@@ -1,0 +1,25 @@
+# TWO-PART MODE, checked by tests/check_layer.py (120 bpm; the default line in A minor):
+#   .\fm1.ps1 host cyberdeck tests/layer.txt > build\host\layer-trace.txt ; python tests\check_layer.py build\host\layer-trace.txt
+#
+# 1  CHROME BASS (mono) plays the sequence
+100 enc 6 1
+300 btn 12
+# 2  hold SEQ for 800 ms: LAYER ON (the sound you hold goes to the layer)
+1500 btn 11 800
+# 3  PRESETS back to NEON RAIN (poly) for the keys: the sequence goes on, in the bass
+2600 enc 6 -1
+# 4  a three-note chord on the keys: voices 0..2; the bass stays on voice 3
+3500 keys 0x4081
+5000 keys 0
+# 5  hold ARP for 800 ms: SWAP (keys: CHROME BASS mono, layer: NEON RAIN poly)
+5500 btn 10 800
+# 6  the same chord now plays on one voice (mono), the sequence is poly on the shared voices
+6800 keys 0x4081
+8000 keys 0
+# 7  stop, then hold SEQ: LAYER OFF
+8300 btn 12
+8500 btn 11 800
+# 8  one part again: the chord is not tagged
+9500 keys 0x4081
+10500 keys 0
+11000 end

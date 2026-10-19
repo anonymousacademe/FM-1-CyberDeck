@@ -24,14 +24,15 @@ HUD with a live oscilloscope, and a HOME button that nudges the patch somewhere 
 | **Mutate** | Double-tap HOME: four to six knobs take a bounded random step, so the patch stays playable |
 | **Scenes** | Tap HOME: every page becomes a neon scene (a city in the rain, a grid corridor, a radar...) with its parameters drawn as light: the filter's curve, the envelope, the echoes, the pattern as a skyline. A loading screen opens the firmware. The art is made in EffectCraft ([assets/art](assets/art)) |
 | **Saving** | 8 patch slots, the global settings and the pattern, kept in flash |
-| **USB** | MIDI in (notes, velocity, six CCs) and out (the keys), and a 16-bit stereo audio input for your computer |
+| **MIDI** | In from an external keyboard over the **TRS jack** (DIN-to-TRS type A cable) or USB: notes with velocity, pitch wheel, program change, all-notes-off, six CCs. Out over USB: the keys, the arpeggiator and the sequencer |
+| **USB audio** | A 16-bit stereo audio input for your computer |
 
 ## The panel in short
 
 | Control | |
 | --- | --- |
 | **EDIT SEL ENV LFO FX GLO** | The OSC, FLT, ENV, LFO, FX and GLO pages; **KNOB 1-4** edit the page |
-| **ARP**, **SEQ** | The arpeggiator (ARP again on its page: on, hold, off) and the sequencer page |
+| **ARP**, **SEQ** | The arpeggiator (ARP again on its page: on, hold, off) and the sequencer page. Hold SEQ: two-part mode on/off (a different sound for the sequence and arp than for the keys); hold ARP: swap |
 | **ALGORITHM**, **SELECT** | Cutoff and resonance, on every page |
 | **PRESETS**, **SAVE** | Choose a patch; store it |
 | **PLAY**, **REC** | Start/stop the pattern; record (step record when stopped, overdub when playing) |
@@ -95,6 +96,8 @@ every voice that starts and stops.
 | `tests/scenes.txt` | The loading screen, then every page as a scene, with a chord and knobs turned (screen shots) |
 | `tests/scenes_stress.txt` | Every scene with every knob at both ends, chords, arp, recording: it must not crash or read out of range |
 | `tests/arp.txt` | The arpeggiator's corners; checked by `tests/check_arp.py` |
+| `tests/layer*.txt` | Two-part mode: layering, mono against poly, swap, MIDI out on channel 2, the arp in the layer, a power cycle, loudness against one part; checked by `tests/check_layer.py` (it runs the host build itself) |
+| `tests/midi.txt` | MIDI on the TRS jack (raw bytes: running status, real-time bytes inside messages, SysEx, velocity 0, program change, pitch wheel, all notes off) and the notes sent out over USB; checked by `tests/check_midi.py` |
 
 ```sh
 tests/run_host.sh tests/arp.txt > build/host/arp-trace.txt

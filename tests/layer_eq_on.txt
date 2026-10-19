@@ -1,0 +1,4 @@
+# both parts the same patch: the layer's sound must equal one part's (tests/check_layer.py compares the audio with layer_eq_off.txt)
+100 btn 11 800
+1200 btn 12
+6000 end
