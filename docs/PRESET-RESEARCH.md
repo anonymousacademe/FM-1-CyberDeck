@@ -292,7 +292,7 @@ Mutate (HOME) works on all of them; REESE, MONOLITH, BRAAM, NYC PULSE, BERLIN SE
 The recipes cannot simply be appended to `FACTORY` and `NPRESET` raised. Options:
 
 1. **Second bank in ROM, edits in the 8 slots.** Selecting a ROM preset copies it into a working slot; SAVE writes the working copy into slot `cur` only for the first 8. Cheapest, but SAVE on a bank-2 preset needs a rule (overwrite which slot?).
-2. **A second flash sector** (as MLdeck does with 0xFB000; GROVEDECK uses the same address, so it is already a known-safe pattern for these projects) holding all presets. Needs the flash range allowed in `FL_RANGE_OK` and a magic + CRC. The cleanest, with the most code.
+2. **A second flash sector** (as MLdeck does with 0xFB000; GROOVEDECK uses the same address, so it is already a known-safe pattern for these projects) holding all presets. Needs the flash range allowed in `FL_RANGE_OK` and a magic + CRC. The cleanest, with the most code.
 3. **Shrink what is saved:** the sequencer pattern (32 B) could move out, which frees 52 B, room for two presets. Not enough on its own.
 4. **Replace weaker factory presets** instead of adding (for example, swap one of the eight). Costs nothing, but the user asked for more, not different.
 
@@ -396,7 +396,7 @@ the dependence on key tracking across the whole keyboard (each preset was run on
 
 ## 10. What the Firmware Hub changes (added after review)
 
-Source: <https://thefirmwarehub.com/> (read 2026-10-16). It lists about 50 FM-1 firmwares; the page gives no per-firmware links, so I could not open most of the projects. Descriptions below are the hub's own one-liners, plus what a web search turned up where noted.
+Source: <https://thefirmwarehub.com/> (read 2026-10-16). It lists 57 FM-1 firmwares. My first read of the page (through a text summariser) lost the links, and I wrongly wrote that the hub gives none. They are in the page's own data, <https://thefirmwarehub.com/catalog.json> (read 2026-10-18, updated 2026-10-18 20:01 UTC): every entry has its GitHub repository, 37 of the 57 have a browser player, and the descriptions below are the hub's own one-liners. Section 10.3 lists the entries that matter for this note.
 The first version of this note treated CYBERDECK's engine as the limit of what the FM-1 can do. The hub shows it is not.
 
 What the hub says exists on this hardware, relevant to the (B) list:
@@ -422,7 +422,7 @@ What this means for the plan:
 Repos read (shallow clones into the session scratchpad, read only, nothing run from them), all GPL-3.0-only unless noted:
 [isod89/sloop-fm1](https://github.com/isod89/sloop-fm1) (commit `ba54ba5`, SLOOP 2.7), [jasonpersinger/ghoulbox-fm1-dungeon-synth](https://github.com/jasonpersinger/ghoulbox-fm1-dungeon-synth),
 [PatttF/fm-106](https://github.com/PatttF/fm-106), [zvenson/dxsloop](https://github.com/zvenson/dxsloop) (cloned, not read beyond its layout), [twochannels/CS-1](https://github.com/twochannels/CS-1).
-The link list came from the community index <https://github.com/cicloid/awesome-fm-1>.
+I first found these links in a community index (<https://github.com/cicloid/awesome-fm-1>); the hub's catalog gives the same repositories.
 
 **1. A CS-80 firmware already exists: CS-1.** Its README describes eight two-channel voices (saw / pulse with PWM / noise per channel), a resonant high-pass and low-pass in series, filter and amp envelopes, touch response,
 a stereo chorus/tremolo, a phaser, a tape delay and a Dattorro plate reverb, 52 sounds. Its Vangelis group is named BLADE BRASS, BR BLUES, BR FLUTE, BR STRINGS, END TITLES, CHIMES, BRASS SWELL and so on, and a further group
@@ -479,3 +479,29 @@ It imports DX7 SysEx banks, so an e-piano or a bell would be a loaded patch, not
 3. Treat **FM** as a second project: port FM6, then bring in e-piano and bell patches by loading DX7 banks. Measure the FM6 voice first.
 4. For listening references, run **CS-1** (Vangelis tones) and **GHOULBOX / Jangada** (dark, reverb-heavy) on the device, or in the browser emulators the CS-1 README mentions, before deciding which of my 16 rows are still worth a slot.
 5. Whichever is chosen, read the CPU figure on the device (bottom line) with 4 notes held; that is the one number I could not get.
+
+### 10.3 The hub entries that map onto this note's candidates
+
+From `catalog.json` (descriptions are the hub's own; I have read the CS-1, SLOOP, GHOULBOX and FM-106 sources, **not** the others). "Player" is the hub's browser emulator, so you can hear each one without touching the device.
+
+| Candidate in this note | Firmware | Repository | Player | What the hub says |
+|---|---|---|---|---|
+| CS80 BRASS, Vangelis | **CS-1** | [twochannels/CS-1](https://github.com/twochannels/CS-1) | <https://twochannels.github.io/CS-1/emu/> | CS-80 in spirit, 22 tones from the owner's manual, filters in series, ring modulator |
+| TEARS EP (the Rhodes) | **Frodhes** | [leonardoMirabal/frodhes](https://github.com/leonardoMirabal/frodhes) | <https://leonardomirabal.github.io/frodhes/> | a physically modelled Rhodes, no samples, tremolo or wah, phaser, chorus, delay, reverb (marked beta; built on Dinghy) |
+| VP STRINGS, OUTRUN PAD | **Shine On** | [zvenson/shineon](https://github.com/zvenson/shineon) | <https://thefirmwarehub.com/play/shineon/> | a string ensemble after the late-70s machines: divide-down keyers, a three-tap BBD ensemble and a phaser |
+| JUP SWEEP, pads, brass | **OberVave** | [zvenson/obervave](https://github.com/zvenson/obervave) | <https://thefirmwarehub.com/play/obervave/> | 8-voice analog-style poly: sync, cross-mod, 12 / 24 dB filter, chorus, ping-pong delay, plate reverb |
+| Juno pads, chorus | **FM-106** | [PatttF/fm-106](https://github.com/PatttF/fm-106) | none | Juno-106 on both cores, BBD stereo chorus, 128 presets |
+| NIGHT DRONE, RISER, atmosphere | **GR!MM** | [GRiMMBIENT/grimm](https://github.com/GRiMMBIENT/grimm) | <https://grimmbient.github.io/grimm/> | dark ambient: VA, 6-op FM, formant voices, physical models, tape, granular freeze, reverbs up to infinite |
+| | **Jangada** | [zednaked/jangada](https://github.com/zednaked/jangada) | <https://zednaked.github.io/jangada/webapp/studio/> | dark industrial drones, ten engines incl. 6-op FM and a superwave analog with a ladder filter |
+| | **GHOULBOX** | [jasonpersinger/ghoulbox-fm1-dungeon-synth](https://github.com/jasonpersinger/ghoulbox-fm1-dungeon-synth) | none | cathedral hall reverb, tape and crush, choirs, organs, hurdy-gurdy |
+| | **AMB-1**, **Tonitor**, **MAKU** | [charlesvestal/fm1-amb](https://github.com/charlesvestal/fm1-amb), [nzimas/tonitor](https://github.com/nzimas/tonitor), [okumurari2/maku](https://github.com/okumurari2/maku) | AMB-1 and MAKU have players | generative ambient, a granulator and a lush reverb, DJ-interlude worlds |
+| CHOIR, vowels, industrial grit | **Pocket GammaWave** | [fvalente/GammaWave-FM1](https://github.com/fvalente/GammaWave-FM1) | <https://fvalente.github.io/GammaWave-FM1/> | four industrial distortions, vowel and scream filters, an FFT spectrogram |
+| FM: TEARS EP, GLASS BELL | **sloopDX**, **Skiff**, **JIANT FM**, **Melodee**, **Bubba Machine**, **FuMi-1** | [zvenson/dxsloop](https://github.com/zvenson/dxsloop), [illuminus5/skiff](https://github.com/illuminus5/skiff), [juanjiant-bit/JIANT](https://github.com/juanjiant-bit/JIANT), [keremimo/melodee](https://github.com/keremimo/melodee), [Erbubar23/bubba-machine](https://github.com/Erbubar23/bubba-machine), [cartesive/fumi-1](https://github.com/cartesive/fumi-1) | Bubba Machine, JIANT have players | 6-operator FM (Dexed) in each; sloopDX takes your own `.syx` banks |
+| Sampling (references, noise) | **zp12**, **PIGEON** | [zvenson/zp12](https://github.com/zvenson/zp12), [TheShrimpBlimp/pigeon](https://github.com/TheShrimpBlimp/pigeon) | both | a 12-bit sampler and a 16-pad sampler |
+| Also on the hub, same base | **Felucca**, **SLOOP**, **X0X**, **ORBIT**, **TRIBE**, **Dinghy** | [hugelton/Felucca](https://github.com/hugelton/Felucca), [isod89/sloop-fm1](https://github.com/isod89/sloop-fm1), [charlesvestal/fm1-x0x](https://github.com/charlesvestal/fm1-x0x) | Felucca and X0X have players | the platform the others share |
+
+What this changes (an addition to 10.1 and 10.2, none of it measured by me):
+
+1. Four of this note's "missing" sounds exist as **finished firmwares on the hub**: the CS-80 tones (CS-1), the Rhodes (Frodhes), a BBD string ensemble (Shine On) and dark-ambient drones and reverbs (GR!MM, Jangada, GHOULBOX). The cheapest listening test of "what does the FM-1 do for this sound" is the player link in the table.
+2. For a CYBERDECK port the **code donors** are now clearer: reverb and chorus from SLOOP (sized in 10.1), a BBD ensemble from Shine On, a Rhodes model from Frodhes, FM6 from SLOOP or sloopDX. Shine On's and Frodhes's sources are the next two to read for size, as I did for SLOOP.
+3. The hub says it checks each project's repository every night and offers the newest release, so the descriptions above are as of 2026-10-18 and may move.
