@@ -1,0 +1,86 @@
+# Builds the firmware on every push and pull request, and keeps the .fwsc as a "firmware" artifact.
+# A tag (v1.1) is a release: built with --release 1.1 (identity FM-1_961), attached to a GitHub release,
+# and announced to mutant.cloud (https://mutant.cloud/fm-1-cyberdeck).
+name: build
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: write
+  id-token: write
+env:
+  SDK_TAG: AC79NN_SDK_V1.2.1_2023-12-13
+  JIELI_TOOLCHAIN: ${{ github.workspace }}/.jieli/toolchain
+  AC79_SDK: ${{ github.workspace }}/.sdk
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install Pillow
+      # JieLi's clang and the three SDK files build.py needs (cpu/wl82/tools), cached between runs
+      - uses: actions/cache@v4
+        id: deps
+        with:
+          path: |
+            .jieli
+            .sdk
+          key: jieli-${{ env.SDK_TAG }}-v1
+      - if: steps.deps.outputs.cache-hit != 'true'
+        run: |
+          tools/get_toolchain.sh .jieli
+          git clone --depth 1 --filter=blob:none --sparse --branch "$SDK_TAG" \
+            https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK.git .sdk-full
+          git -C .sdk-full sparse-checkout set cpu/wl82/tools/cfg
+          mkdir -p .sdk/cpu/wl82/tools/cfg
+          cp .sdk-full/cpu/wl82/tools/uboot.boot .sdk-full/cpu/wl82/tools/cfg_tool.bin .sdk/cpu/wl82/tools/
+          cp .sdk-full/cpu/wl82/tools/cfg/eq_cfg_hw.bin .sdk/cpu/wl82/tools/cfg/
+          rm -rf .sdk-full
+      - name: Check the SDK files
+        working-directory: .sdk/cpu/wl82/tools
+        run: |
+          sha256sum -c <<'SUMS'
+          4e3b4c220dc96641cb5a723f41e68ce41d5261ae9434bb33fbd7f2c59976ded4  uboot.boot
+          276579954f076886a6a7694f65dc71c034a63a2c204b76749065c0ac7b010d1b  cfg_tool.bin
+          41167491bffed4651750719c973d2758adeb9021a5670d02d6a53c85ed80ea7d  cfg/eq_cfg_hw.bin
+          SUMS
+      - name: Test on the host
+        run: tests/run_host.sh tests/demo.txt
+      - name: Build
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            ./build.sh --release "${GITHUB_REF_NAME#v}"
+          else
+            ./build.sh
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: build/*.fwsc
+          if-no-files-found: error
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: build/cyberdeck-*.fwsc
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+      # GitHub's release list lags a new release by a few seconds, and mutant.cloud reads that list: wait for it
+      - if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          for i in $(seq 30); do
+            gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name' | grep -qx "$GITHUB_REF_NAME" && exit 0
+            sleep 5
+          done
+          echo "::error::$GITHUB_REF_NAME never showed up in the release list"
+          exit 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+      # tell mutant.cloud (a release made with github.token doesn't trigger release workflows)
+      - uses: konsumer/mutantcloud@main
+        if: startsWith(github.ref, 'refs/tags/v')
