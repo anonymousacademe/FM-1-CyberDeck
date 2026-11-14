@@ -34,7 +34,7 @@ jobs:
           key: jieli-${{ env.SDK_TAG }}-v1
       - if: steps.deps.outputs.cache-hit != 'true'
         run: |
-          tools/get_toolchain.sh .jieli
+          sh tools/get_toolchain.sh .jieli
           git clone --depth 1 --filter=blob:none --sparse --branch "$SDK_TAG" \
             https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK.git .sdk-full
           git -C .sdk-full sparse-checkout set cpu/wl82/tools/cfg
@@ -51,13 +51,13 @@ jobs:
           41167491bffed4651750719c973d2758adeb9021a5670d02d6a53c85ed80ea7d  cfg/eq_cfg_hw.bin
           SUMS
       - name: Test on the host
-        run: tests/run_host.sh tests/demo.txt
+        run: sh tests/run_host.sh tests/demo.txt
       - name: Build
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            ./build.sh --release "${GITHUB_REF_NAME#v}"
+            sh build.sh --release "${GITHUB_REF_NAME#v}"
           else
-            ./build.sh
+            sh build.sh
           fi
       - uses: actions/upload-artifact@v4
         with:
