@@ -43,11 +43,12 @@ Everything else is in the [manual](docs/MANUAL.md).
 
 ## Install
 
-Install `releases/cyberdeck-1.0.fwsc` with the [FM-1 Firmware Hub](https://fm1.designburgapps.com) in Chrome or Edge,
-or over USB:
+The easiest way is **[mutant.cloud/fm-1-cyberdeck](https://mutant.cloud/fm-1-cyberdeck)**: plug the FM-1 in and press
+**Install** (Chrome or Edge), or **▶ Try** it in the emulator first. Every release is also on the
+[releases page](https://github.com/anonymousacademe/FM-1-CyberDeck/releases/latest) as a `.fwsc`, for the [FM-1 Firmware Hub](https://fm1.designburgapps.com) or USB:
 
 ```sh
-python3 tools/fm1_install.py releases/cyberdeck-1.0.fwsc
+python3 tools/fm1_install.py cyberdeck-1.0.fwsc
 ```
 
 Going back to another firmware, or to the official one, works the same way through the hub. If the FM-1 won't start,
@@ -81,6 +82,20 @@ python3 tools/fm1_install.py build/cyberdeck.fwsc
 
 In the FM-1 Projects workspace the same steps are `.\fm1.ps1 host cyberdeck`, `.\fm1.ps1 build cyberdeck` and
 `.\fm1.ps1 install cyberdeck`.
+
+## Releases
+
+GitHub Actions ([.github/workflows/build.yml](.github/workflows/build.yml)) builds the firmware on every push and pull
+request; the `.fwsc` is kept as the run's `firmware` artifact. To release, push a tag:
+
+```sh
+git tag v1.1 && git push origin v1.1
+```
+
+The tag's build runs `./build.sh --release 1.1` (identity `FM-1_961`), makes a GitHub release with
+`cyberdeck-1.1.fwsc` attached, and tells [mutant.cloud](https://mutant.cloud/fm-1-cyberdeck), so the listing's
+**Install** button gets the new version right away. If that last step ever fails, run the `mutant.cloud` workflow by
+hand with the tag.
 
 ## Tests
 
